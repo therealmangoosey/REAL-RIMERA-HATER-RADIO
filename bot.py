@@ -294,8 +294,15 @@ class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
             if self.attachment.content_type and self.attachment.content_type.startswith('image/'):
                 embed.set_image(url=f"attachment://{self.attachment.filename}")
 
-        await channel.send(embed=embed, files=files)
-        await interaction.followup.send("Your recommendation has been submitted!")
+        try:
+            await channel.send(embed=embed, files=files)
+            await interaction.followup.send("✅ Your recommendation has been submitted successfully!")
+        except discord.Forbidden:
+            logger.error(f"Permission denied (50001) for channel {target_channel_id}. Bot lacks 'View Channel' or 'Send Messages'.")
+            await interaction.followup.send(f"❌ Error: I don't have access to the recommendation channel. Please ensure I have 'View Channel' and 'Send Messages' permissions in <#{target_channel_id}>.")
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send recommendation: {e}")
+            await interaction.followup.send("❌ Something went wrong while submitting your recommendation.")
 
 
 bot = RimeraBot()
@@ -459,7 +466,7 @@ async def set_soundcloud_channel(interaction: discord.Interaction, channel: disc
 
 
 @bot.tree.command(name="set-youtube-channel", description="Set the YouTube update channel")
-@app_commands.checks.has_permissions(administrator=True)
+@is_admin_or_super_user()
 async def set_youtube_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_source_channel(interaction, 'youtube', channel)
 
