@@ -1,0 +1,29 @@
+{
+    "channel_id": 0,
+    "channels": {
+        "default": 0,
+        "website": 0,
+        "twitter": 0,
+        "tiktok": 0,
+        "tumblr": 0,
+        "instagram": 0,
+        "spotify": 0,
+        "youtube": 0
+    },
+    "polling_interval_minutes": 5,
+    "flask_port": 5000,
+    "enable_web_server": false,
+    "website_url": "https://rimerarimera.com",
+    "tumblr_url": "https://rimeraera.tumblr.com",
+    "instagram_url": "https://www.instagram.com/rimeraera/",
+    "spotify_url": "https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38",
+    "youtube_url": "https://www.youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw",
+    "youtube_channel_id": "UCeliKm-RLwRJNWJLOhv3lNw",
+    "twitter_handle": "rimera_official",
+    "tiktok_handle": "rimera_official",
+    "nitter_instances": [
+        "https://nitter.net",
+        "https://nitter.cz",
+        "https://nitter.privacydev.net"
+    ]
+}
