@@ -1,0 +1,160 @@
+# Real Rimera Hater Radio Bot
+
+A Discord bot that watches Rimera-related shops and socials, then posts clean Discord embeds when it finds new updates.
+
+## What It Does
+
+- Checks `rimerarimera.com` for new products and restocks.
+- Posts product embeds with the product name, description, photo, price, stock status, and variant availability.
+- Tracks Rimera socials for visible changes or new feed items:
+  - Tumblr
+  - Instagram
+  - Spotify
+  - YouTube
+  - Twitter/X through Nitter instances
+  - TikTok through Selenium
+- Lets server admins choose separate Discord channels for each update type.
+- Keeps a local `cache.json` so old posts/products are not repeatedly announced.
+- Requires the Discord token to be stored in `.env`, not `config.json`.
+
+## Python Version
+
+Use Python 3.10 or newer.
+
+This bot was checked locally with Python 3.14.3, but Python 3.10+ is the intended supported range for the current dependencies.
+
+## Setup
+
+1. Clone the repo:
+
+```powershell
+git clone https://github.com/therealmangoosey/REAL-RIMERA-HATER-RADIO.git
+cd REAL-RIMERA-HATER-RADIO
+```
+
+2. Create a virtual environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+3. Install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+4. Create your `.env` file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+5. Open `.env` and put your bot token in it:
+
+```env
+DISCORD_TOKEN=your_actual_discord_bot_token_here
+```
+
+Do not commit `.env`. It is ignored by `.gitignore`.
+
+## Discord Bot Permissions
+
+In the Discord Developer Portal, make sure the bot has:
+
+- `bot`
+- `applications.commands`
+
+Recommended bot permissions:
+
+- Send Messages
+- Embed Links
+- Read Message History
+- Use Slash Commands
+
+If you use channel-specific permissions, make sure the bot can send messages and embeds in every configured update channel.
+
+## Running The Bot
+
+From the repo folder, with the virtual environment active:
+
+```powershell
+python bot.py
+```
+
+On startup, the bot syncs slash commands and starts the polling loop.
+
+## Configuration
+
+Most settings live in `config.json`.
+
+Important fields:
+
+- `polling_interval_minutes`: how often the bot checks for updates.
+- `website_url`: the Rimera shop URL.
+- `channels`: Discord channel IDs for each source.
+- `twitter_handle`: Twitter/X handle to check through Nitter.
+- `tiktok_handle`: TikTok handle to check.
+- `tumblr_url`: Tumblr profile to check.
+- `instagram_url`: Instagram profile to check.
+- `spotify_url`: Spotify artist/profile/release URL to check.
+- `youtube_url` or `youtube_channel_id`: YouTube channel to check.
+
+You can set channel IDs through slash commands, so you usually do not need to edit them by hand.
+
+## Slash Commands
+
+General:
+
+- `/status` shows bot status, monitored URLs, polling interval, and configured channels.
+- `/channels` shows where each update type is posted.
+- `/check-products` immediately checks `rimerarimera.com`.
+- `/check-socials` immediately checks Tumblr, Instagram, Spotify, and YouTube.
+
+Channel setup:
+
+- `/set-channel` sets the default update channel.
+- `/set-website-channel` sets the product/restock channel.
+- `/set-twitter-channel` sets the Twitter/X channel.
+- `/set-tiktok-channel` sets the TikTok channel.
+- `/set-tumblr-channel` sets the Tumblr channel.
+- `/set-instagram-channel` sets the Instagram channel.
+- `/set-spotify-channel` sets the Spotify channel.
+- `/set-youtube-channel` sets the YouTube channel.
+
+Social URL setup:
+
+- `/set-social-url` sets the monitored Tumblr, Instagram, Spotify, or YouTube URL.
+
+Admin permission is required for setup and manual check commands.
+
+## How Updates Work
+
+The first time the bot sees a source, it saves the current items to `cache.json` without posting them. After that:
+
+- New products are announced.
+- Products that change from sold out to in stock are announced as restocks.
+- New feed items from Tumblr and YouTube are announced.
+- Instagram and Spotify are checked for visible public metadata/page changes.
+- Twitter/X and TikTok are checked for newly discovered posts/videos.
+
+## Testing
+
+Run the test suite:
+
+```powershell
+python -m unittest discover -v
+```
+
+Run a compile check:
+
+```powershell
+python -m compileall bot.py discord_formatter.py state_manager.py scrapers
+```
+
+## Notes
+
+- TikTok checking uses Selenium and ChromeDriver. If those dependencies are missing or ChromeDriver cannot run, the bot logs the TikTok error and continues checking the other sources.
+- Twitter/X checking uses public Nitter instances, which can be unreliable. Add or change instances in `config.json` if needed.
+- `cache.json` and `bot.log` are local runtime files and are ignored by Git.
