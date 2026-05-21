@@ -257,9 +257,8 @@ class RimeraBot(commands.Bot):
 
 
 class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
-    rec_title = discord.ui.TextInput(label='Product/Feature Name', placeholder='e.g. Vintage Rimera Tee', required=True)
-    price = discord.ui.TextInput(label='Price Suggestion (optional)', placeholder='e.g. $25.00', required=False)
-    description = discord.ui.TextInput(label='Details', style=discord.TextStyle.paragraph, placeholder='Describe your recommendation...', required=True)
+    rec_title = discord.ui.TextInput(label='Feature or Page Name', placeholder='e.g. Dark Mode, Gallery Page', required=True)
+    description = discord.ui.TextInput(label='Details', style=discord.TextStyle.paragraph, placeholder='Describe your suggestion for rimera.vercel.app...', required=True)
 
     def __init__(self, attachment: discord.Attachment = None):
         super().__init__()
@@ -282,10 +281,8 @@ class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
             timestamp=discord.utils.utcnow()
         )
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        embed.add_field(name="🏷️ Item", value=self.rec_title.value, inline=False)
-        if self.price.value:
-            embed.add_field(name="💰 Suggested Price", value=self.price.value, inline=True)
-        embed.add_field(name="📝 Description", value=self.description.value, inline=False)
+        embed.add_field(name="🏷️ Suggestion", value=self.rec_title.value, inline=False)
+        embed.add_field(name="📝 Details", value=self.description.value, inline=False)
         
         files = []
         if self.attachment:
