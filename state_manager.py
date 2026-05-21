@@ -20,9 +20,10 @@ class StateManager:
             "Twitter": [],
             "TikTok": [],
             "Website": [],
-            "Tumblr": [],
             "Instagram": [],
             "Spotify": [],
+            "Apple Music": [],
+            "SoundCloud": [],
             "YouTube": [],
         }
 

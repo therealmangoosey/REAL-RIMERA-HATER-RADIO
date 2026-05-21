@@ -38,6 +38,12 @@ class SocialScraper:
     def get_instagram_updates(self):
         return self._page_signature_update('Instagram', self.config.get('instagram_url'))
 
+    def get_apple_music_updates(self):
+        return self._page_signature_update('Apple Music', self.config.get('apple_music_url'))
+
+    def get_soundcloud_updates(self):
+        return self._page_signature_update('SoundCloud', self.config.get('soundcloud_url'))
+
     def get_spotify_updates(self):
         spotify_url = self.config.get('spotify_url')
         if not spotify_url:

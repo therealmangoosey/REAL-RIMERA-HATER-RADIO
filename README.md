@@ -6,10 +6,11 @@ A Discord bot that watches Rimera-related shops and socials, then posts clean Di
 
 - Checks `rimerarimera.com` for new products and restocks.
 - Posts product embeds with the product name, description, photo, price, stock status, and variant availability.
-- Tracks Rimera socials for visible changes or new feed items:
-  - Tumblr
+- Tracks Rimera social/music links from `https://linktr.ee/rimerarimera` for visible changes or new feed items:
   - Instagram
   - Spotify
+  - Apple Music
+  - SoundCloud
   - YouTube
   - Twitter/X through Nitter instances
   - TikTok through Selenium
@@ -93,18 +94,20 @@ Most settings live in `config.json`.
 Important fields:
 
 - `polling_interval_minutes`: how often the bot checks for updates.
+- `linktree_url`: the Linktree used as the source of truth for Rimera social/music links.
 - `website_url`: the Rimera shop URL.
 - `channels`: Discord channel IDs for each source.
 - `twitter_handle`: Twitter/X handle to check through Nitter.
 - `tiktok_handle`: TikTok handle to check.
-- `tumblr_url`: Tumblr profile to check.
 - `instagram_url`: Instagram profile to check.
 - `spotify_url`: Spotify artist/profile/release URL to check.
+- `apple_music_url`: Apple Music artist URL to check.
+- `soundcloud_url`: SoundCloud URL to check.
 - `youtube_url` or `youtube_channel_id`: YouTube channel to check.
 - `initial_password`: password required for `/initial`.
 - `initial_subscribers`: user IDs that receive private early shop alerts.
 
-You can set channel IDs through slash commands, so you usually do not need to edit them by hand.
+You can set channel IDs through slash commands, so you usually do not need to edit them by hand. Social/music URLs come from the Linktree defaults in `config.json`.
 
 ## Slash Commands
 
@@ -113,7 +116,7 @@ General:
 - `/status` shows bot status, monitored URLs, polling interval, and configured channels.
 - `/channels` shows where each update type is posted.
 - `/check-products` immediately checks `rimerarimera.com`.
-- `/check-socials` immediately checks Tumblr, Instagram, Spotify, and YouTube.
+- `/check-socials` immediately checks the Linktree-listed social/music pages.
 - `/initial` registers a user for private early shop alerts when they enter the correct password.
 
 Channel setup:
@@ -123,14 +126,11 @@ Channel setup:
 - `/set-shop-channel` also sets the product/restock channel.
 - `/set-twitter-channel` sets the Twitter/X channel.
 - `/set-tiktok-channel` sets the TikTok channel.
-- `/set-tumblr-channel` sets the Tumblr channel.
 - `/set-instagram-channel` sets the Instagram channel.
 - `/set-spotify-channel` sets the Spotify channel.
+- `/set-apple-music-channel` sets the Apple Music channel.
+- `/set-soundcloud-channel` sets the SoundCloud channel.
 - `/set-youtube-channel` sets the YouTube channel.
-
-Social URL setup:
-
-- `/set-social-url` sets the monitored Tumblr, Instagram, Spotify, or YouTube URL.
 
 Admin permission is required for setup and manual check commands.
 
@@ -148,8 +148,8 @@ The first time the bot sees a source, it saves the current items to `cache.json`
 - Products that change from sold out to in stock are announced as restocks.
 - Users who registered with `/initial` get a private early shop alert immediately.
 - The configured website/shop update channel gets the same shop update 2 minutes later.
-- New feed items from Tumblr and YouTube are announced.
-- Instagram and Spotify are checked for visible public metadata/page changes.
+- New feed items from YouTube are announced.
+- Instagram, Spotify, Apple Music, and SoundCloud are checked for visible public metadata/page changes.
 - Twitter/X and TikTok are checked for newly discovered posts/videos.
 
 ## Testing

@@ -12,6 +12,8 @@ class DiscordFormatter:
             'Tumblr': 0x36465D,
             'Instagram': 0xDD2A7B,
             'Spotify': 0x1DB954,
+            'Apple Music': 0xFA243C,
+            'SoundCloud': 0xFF5500,
             'YouTube': 0xFF0000,
         }.get(source, 0xE85D9E)
 

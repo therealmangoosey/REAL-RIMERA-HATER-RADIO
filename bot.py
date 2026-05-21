@@ -37,9 +37,10 @@ SOURCE_LABELS = {
     'website': 'Website',
     'twitter': 'Twitter',
     'tiktok': 'TikTok',
-    'tumblr': 'Tumblr',
     'instagram': 'Instagram',
     'spotify': 'Spotify',
+    'apple_music': 'Apple Music',
+    'soundcloud': 'SoundCloud',
     'youtube': 'YouTube',
 }
 
@@ -54,10 +55,12 @@ def load_config():
     if loaded_config.get('channel_id') and not loaded_config['channels'].get('default'):
         loaded_config['channels']['default'] = loaded_config['channel_id']
     loaded_config.setdefault('website_url', 'https://rimerarimera.com')
-    loaded_config.setdefault('tumblr_url', 'https://rimeraera.tumblr.com')
-    loaded_config.setdefault('instagram_url', 'https://www.instagram.com/rimeraera/')
-    loaded_config.setdefault('spotify_url', 'https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38')
-    loaded_config.setdefault('youtube_url', 'https://www.youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
+    loaded_config.setdefault('linktree_url', 'https://linktr.ee/rimerarimera')
+    loaded_config.setdefault('instagram_url', 'https://instagram.com/rimeraera?igshid=YTM0ZjI4ZDI=')
+    loaded_config.setdefault('spotify_url', 'https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38?si=90d_vXIFSiCDkBjAGG0FyA')
+    loaded_config.setdefault('apple_music_url', 'https://music.apple.com/gb/artist/rimera/1478454603')
+    loaded_config.setdefault('soundcloud_url', 'https://soundcloud.app.goo.gl/HuhB6bRZBe9Qutt68')
+    loaded_config.setdefault('youtube_url', 'https://youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
     loaded_config.setdefault('youtube_channel_id', 'UCeliKm-RLwRJNWJLOhv3lNw')
     loaded_config.setdefault('initial_password', 'Phone118')
     loaded_config.setdefault('initial_subscribers', [])
@@ -207,9 +210,10 @@ class RimeraBot(commands.Bot):
 
     async def poll_social_sources(self):
         source_checks = [
-            ('tumblr', 'Tumblr', self.social_scraper.get_tumblr_updates),
             ('instagram', 'Instagram', self.social_scraper.get_instagram_updates),
             ('spotify', 'Spotify', self.social_scraper.get_spotify_updates),
+            ('apple_music', 'Apple Music', self.social_scraper.get_apple_music_updates),
+            ('soundcloud', 'SoundCloud', self.social_scraper.get_soundcloud_updates),
             ('youtube', 'YouTube', self.social_scraper.get_youtube_updates),
         ]
 
@@ -253,9 +257,11 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Website", value=bot.website_scraper.url, inline=False)
     embed.add_field(name="Twitter", value=f"@{bot.twitter_scraper.handle}", inline=True)
     embed.add_field(name="TikTok", value=f"@{bot.tiktok_scraper.handle}", inline=True)
-    embed.add_field(name="Tumblr", value=config.get('tumblr_url') or "Not set", inline=False)
+    embed.add_field(name="Linktree", value=config.get('linktree_url') or "Not set", inline=False)
     embed.add_field(name="Instagram", value=config.get('instagram_url') or "Not set", inline=False)
     embed.add_field(name="Spotify", value=config.get('spotify_url') or "Not set", inline=False)
+    embed.add_field(name="Apple Music", value=config.get('apple_music_url') or "Not set", inline=False)
+    embed.add_field(name="SoundCloud", value=config.get('soundcloud_url') or "Not set", inline=False)
     embed.add_field(name="YouTube", value=config.get('youtube_url') or config.get('youtube_channel_id') or "Not set", inline=False)
     embed.add_field(name="Polling", value=f"{config.get('polling_interval_minutes', 5)} minutes", inline=True)
     embed.add_field(name="Early shop alerts", value=f"{len(config.get('initial_subscribers', []))} subscriber(s)", inline=True)
@@ -303,12 +309,6 @@ async def set_tiktok_channel(interaction: discord.Interaction, channel: discord.
     await set_source_channel(interaction, 'tiktok', channel)
 
 
-@bot.tree.command(name="set-tumblr-channel", description="Set the Tumblr update channel")
-@app_commands.checks.has_permissions(administrator=True)
-async def set_tumblr_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'tumblr', channel)
-
-
 @bot.tree.command(name="set-instagram-channel", description="Set the Instagram update channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_instagram_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -321,33 +321,22 @@ async def set_spotify_channel(interaction: discord.Interaction, channel: discord
     await set_source_channel(interaction, 'spotify', channel)
 
 
+@bot.tree.command(name="set-apple-music-channel", description="Set the Apple Music update channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_apple_music_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_source_channel(interaction, 'apple_music', channel)
+
+
+@bot.tree.command(name="set-soundcloud-channel", description="Set the SoundCloud update channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_soundcloud_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_source_channel(interaction, 'soundcloud', channel)
+
+
 @bot.tree.command(name="set-youtube-channel", description="Set the YouTube update channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_youtube_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_source_channel(interaction, 'youtube', channel)
-
-
-@bot.tree.command(name="set-social-url", description="Set a social profile URL to monitor")
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.choices(source=[
-    app_commands.Choice(name="Tumblr", value="tumblr_url"),
-    app_commands.Choice(name="Instagram", value="instagram_url"),
-    app_commands.Choice(name="Spotify", value="spotify_url"),
-    app_commands.Choice(name="YouTube", value="youtube_url"),
-])
-async def set_social_url(
-    interaction: discord.Interaction,
-    source: app_commands.Choice[str],
-    url: str
-):
-    config[source.value] = url.strip()
-    if source.value == 'youtube_url':
-        config['youtube_channel_id'] = ''
-    save_config()
-    await interaction.response.send_message(
-        f"{source.name} monitoring URL set to {url}.",
-        ephemeral=True
-    )
 
 
 @bot.tree.command(name="initial", description="Register for private early shop alerts")
@@ -386,15 +375,16 @@ async def check_products(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="check-socials", description="Check Tumblr, Instagram, Spotify, and YouTube now")
+@bot.tree.command(name="check-socials", description="Check Linktree-listed social and music pages now")
 @app_commands.checks.has_permissions(administrator=True)
 async def check_socials(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     source_checks = [
-        ('tumblr', 'Tumblr', bot.social_scraper.get_tumblr_updates),
         ('instagram', 'Instagram', bot.social_scraper.get_instagram_updates),
         ('spotify', 'Spotify', bot.social_scraper.get_spotify_updates),
+        ('apple_music', 'Apple Music', bot.social_scraper.get_apple_music_updates),
+        ('soundcloud', 'SoundCloud', bot.social_scraper.get_soundcloud_updates),
         ('youtube', 'YouTube', bot.social_scraper.get_youtube_updates),
     ]
     checked_count = 0
