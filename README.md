@@ -14,6 +14,7 @@ A Discord bot that watches Rimera-related shops and socials, then posts clean Di
   - Twitter/X through Nitter instances
   - TikTok through Selenium
 - Lets server admins choose separate Discord channels for each update type.
+- Lets approved users register for private early shop alerts before the public shop channel post.
 - Keeps a local `cache.json` so old posts/products are not repeatedly announced.
 - Requires the Discord token to be stored in `.env`, not `config.json`.
 
@@ -100,6 +101,8 @@ Important fields:
 - `instagram_url`: Instagram profile to check.
 - `spotify_url`: Spotify artist/profile/release URL to check.
 - `youtube_url` or `youtube_channel_id`: YouTube channel to check.
+- `initial_password`: password required for `/initial`.
+- `initial_subscribers`: user IDs that receive private early shop alerts.
 
 You can set channel IDs through slash commands, so you usually do not need to edit them by hand.
 
@@ -111,11 +114,13 @@ General:
 - `/channels` shows where each update type is posted.
 - `/check-products` immediately checks `rimerarimera.com`.
 - `/check-socials` immediately checks Tumblr, Instagram, Spotify, and YouTube.
+- `/initial` registers a user for private early shop alerts when they enter the correct password.
 
 Channel setup:
 
 - `/set-channel` sets the default update channel.
 - `/set-website-channel` sets the product/restock channel.
+- `/set-shop-channel` also sets the product/restock channel.
 - `/set-twitter-channel` sets the Twitter/X channel.
 - `/set-tiktok-channel` sets the TikTok channel.
 - `/set-tumblr-channel` sets the Tumblr channel.
@@ -129,12 +134,20 @@ Social URL setup:
 
 Admin permission is required for setup and manual check commands.
 
+The `/initial` command does not require admin permission. The current password is:
+
+```text
+Phone118
+```
+
 ## How Updates Work
 
 The first time the bot sees a source, it saves the current items to `cache.json` without posting them. After that:
 
 - New products are announced.
 - Products that change from sold out to in stock are announced as restocks.
+- Users who registered with `/initial` get a private early shop alert immediately.
+- The configured website/shop update channel gets the same shop update 2 minutes later.
 - New feed items from Tumblr and YouTube are announced.
 - Instagram and Spotify are checked for visible public metadata/page changes.
 - Twitter/X and TikTok are checked for newly discovered posts/videos.

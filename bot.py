@@ -43,6 +43,8 @@ SOURCE_LABELS = {
     'youtube': 'YouTube',
 }
 
+SHOP_PUBLIC_DELAY_SECONDS = 120
+
 
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
@@ -57,6 +59,8 @@ def load_config():
     loaded_config.setdefault('spotify_url', 'https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38')
     loaded_config.setdefault('youtube_url', 'https://www.youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
     loaded_config.setdefault('youtube_channel_id', 'UCeliKm-RLwRJNWJLOhv3lNw')
+    loaded_config.setdefault('initial_password', 'Phone118')
+    loaded_config.setdefault('initial_subscribers', [])
     return loaded_config
 
 
@@ -134,6 +138,33 @@ class RimeraBot(commands.Bot):
             logger.error(f"Could not send {source_key} update to channel {channel_id}: {e}")
             return False
 
+    async def send_early_shop_update(self, item):
+        subscriber_ids = config.get('initial_subscribers', [])
+        if not subscriber_ids:
+            logger.info("No /initial subscribers configured for early shop update.")
+            return 0
+
+        sent_count = 0
+        embed = self.formatter.format_item(item)
+        for user_id in subscriber_ids:
+            try:
+                user = self.get_user(int(user_id)) or await self.fetch_user(int(user_id))
+                await user.send(content=f"<@{user_id}> early shop update:", embed=embed)
+                sent_count += 1
+            except discord.DiscordException as e:
+                logger.error(f"Could not send early shop update to user {user_id}: {e}")
+
+        return sent_count
+
+    async def send_delayed_shop_channel_update(self, item):
+        await asyncio.sleep(SHOP_PUBLIC_DELAY_SECONDS)
+        await self.send_item_update('website', item)
+
+    async def handle_shop_update(self, item):
+        early_count = await self.send_early_shop_update(item)
+        logger.info(f"Sent early shop update to {early_count} subscriber(s).")
+        asyncio.create_task(self.send_delayed_shop_channel_update(item))
+
     @tasks.loop(minutes=config.get('polling_interval_minutes', 5))
     async def polling_loop(self):
         logger.info("Starting polling cycle...")
@@ -170,7 +201,7 @@ class RimeraBot(commands.Bot):
             products = await asyncio.to_thread(self.website_scraper.get_latest_products)
             updates = self.state_manager.get_product_updates(products)
             for product in updates:
-                await self.send_item_update('website', product)
+                await self.handle_shop_update(product)
         except Exception as e:
             logger.error(f"Error in Website polling: {e}")
 
@@ -227,6 +258,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Spotify", value=config.get('spotify_url') or "Not set", inline=False)
     embed.add_field(name="YouTube", value=config.get('youtube_url') or config.get('youtube_channel_id') or "Not set", inline=False)
     embed.add_field(name="Polling", value=f"{config.get('polling_interval_minutes', 5)} minutes", inline=True)
+    embed.add_field(name="Early shop alerts", value=f"{len(config.get('initial_subscribers', []))} subscriber(s)", inline=True)
     embed.add_field(name="Channels", value=bot.configured_channel_mentions(), inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -250,6 +282,12 @@ async def set_channel(interaction: discord.Interaction, channel: discord.TextCha
 @bot.tree.command(name="set-website-channel", description="Set the product and restock update channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_website_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_source_channel(interaction, 'website', channel)
+
+
+@bot.tree.command(name="set-shop-channel", description="Set the shop product and restock update channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_shop_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_source_channel(interaction, 'website', channel)
 
 
@@ -312,6 +350,24 @@ async def set_social_url(
     )
 
 
+@bot.tree.command(name="initial", description="Register for private early shop alerts")
+async def initial(interaction: discord.Interaction, password: str):
+    if password != config.get('initial_password', 'Phone118'):
+        await interaction.response.send_message("Incorrect password.", ephemeral=True)
+        return
+
+    subscriber_id = str(interaction.user.id)
+    subscribers = config.setdefault('initial_subscribers', [])
+    if subscriber_id not in subscribers:
+        subscribers.append(subscriber_id)
+        save_config()
+        message = "You are registered for private early shop alerts."
+    else:
+        message = "You are already registered for private early shop alerts."
+
+    await interaction.response.send_message(message, ephemeral=True)
+
+
 @bot.tree.command(name="check-products", description="Check rimerarimera.com now for new or restocked products")
 @app_commands.checks.has_permissions(administrator=True)
 async def check_products(interaction: discord.Interaction):
@@ -321,11 +377,11 @@ async def check_products(interaction: discord.Interaction):
 
     sent_count = 0
     for product in updates:
-        if await bot.send_item_update('website', product):
-            sent_count += 1
+        sent_count += await bot.send_early_shop_update(product)
+        asyncio.create_task(bot.send_delayed_shop_channel_update(product))
 
     await interaction.followup.send(
-        f"Checked {len(products)} products. Sent {sent_count} product update(s).",
+        f"Checked {len(products)} products. Sent {sent_count} early alert(s). Shop channel updates will post 2 minutes later.",
         ephemeral=True
     )
 
