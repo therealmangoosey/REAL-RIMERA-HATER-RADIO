@@ -37,14 +37,11 @@ SOURCE_LABELS = {
     'website': 'Website',
     'twitter': 'Twitter',
     'tiktok': 'TikTok',
+    'tumblr': 'Tumblr',
     'instagram': 'Instagram',
     'spotify': 'Spotify',
-    'apple_music': 'Apple Music',
-    'soundcloud': 'SoundCloud',
     'youtube': 'YouTube',
 }
-
-SHOP_PUBLIC_DELAY_SECONDS = 120
 
 
 def load_config():
@@ -55,15 +52,11 @@ def load_config():
     if loaded_config.get('channel_id') and not loaded_config['channels'].get('default'):
         loaded_config['channels']['default'] = loaded_config['channel_id']
     loaded_config.setdefault('website_url', 'https://rimerarimera.com')
-    loaded_config.setdefault('linktree_url', 'https://linktr.ee/rimerarimera')
-    loaded_config.setdefault('instagram_url', 'https://instagram.com/rimeraera?igshid=YTM0ZjI4ZDI=')
-    loaded_config.setdefault('spotify_url', 'https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38?si=90d_vXIFSiCDkBjAGG0FyA')
-    loaded_config.setdefault('apple_music_url', 'https://music.apple.com/gb/artist/rimera/1478454603')
-    loaded_config.setdefault('soundcloud_url', 'https://soundcloud.app.goo.gl/HuhB6bRZBe9Qutt68')
-    loaded_config.setdefault('youtube_url', 'https://youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
+    loaded_config.setdefault('tumblr_url', 'https://rimeraera.tumblr.com')
+    loaded_config.setdefault('instagram_url', 'https://www.instagram.com/rimeraera/')
+    loaded_config.setdefault('spotify_url', 'https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38')
+    loaded_config.setdefault('youtube_url', 'https://www.youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
     loaded_config.setdefault('youtube_channel_id', 'UCeliKm-RLwRJNWJLOhv3lNw')
-    loaded_config.setdefault('initial_password', 'Phone118')
-    loaded_config.setdefault('initial_subscribers', [])
     return loaded_config
 
 
@@ -86,10 +79,10 @@ class RimeraBot(commands.Bot):
 
         self.state_manager = StateManager()
         self.twitter_scraper = TwitterScraper(
-            config.get('twitter_handle', 'rimera_official'),
+            config.get('twitter_handle', 'rimera'),
             config.get('nitter_instances', ["https://nitter.net"])
         )
-        self.tiktok_scraper = TikTokScraper(config.get('tiktok_handle', 'rimera_official'))
+        self.tiktok_scraper = TikTokScraper(config.get('tiktok_handle', 'rimera'))
         self.website_scraper = WebsiteScraper(config.get('website_url', 'https://rimerarimera.com'))
         self.social_scraper = SocialScraper(config)
         self.formatter = DiscordFormatter()
@@ -103,6 +96,7 @@ class RimeraBot(commands.Bot):
 
     async def on_ready(self):
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
+        await self.change_presence(activity=discord.Game(name="rimera.vercel.app"))
         try:
             synced = await self.tree.sync()
             logger.info(f"Synced {len(synced)} command(s)")
@@ -116,8 +110,14 @@ class RimeraBot(commands.Bot):
     def configured_channel_mentions(self):
         rows = []
         for key, label in SOURCE_LABELS.items():
-            channel_id = self.channel_id_for(key) if key != 'default' else config.get('channels', {}).get('default')
-            channel = self.get_channel(int(channel_id)) if channel_id else None
+            channel_id = self.channel_id_for(key)
+            channel = None
+            if channel_id:
+                try:
+                    channel = self.get_channel(int(channel_id))
+                except (ValueError, TypeError):
+                    pass
+            
             value = channel.mention if channel else (f"`{channel_id}`" if channel_id else "Not set")
             rows.append(f"{label}: {value}")
         return "\n".join(rows)
@@ -128,7 +128,14 @@ class RimeraBot(commands.Bot):
             logger.warning(f"No channel configured for {source_key}; skipping notification.")
             return False
 
-        channel = self.get_channel(int(channel_id))
+        channel = None
+        try:
+            channel_id_int = int(channel_id)
+            channel = self.get_channel(channel_id_int) or await self.fetch_channel(channel_id_int)
+        except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            logger.error(f"Error retrieving channel {channel_id} for {source_key}: {e}")
+            return False
+
         if not channel:
             logger.error(f"Could not find channel with ID {channel_id} for {source_key}")
             return False
@@ -140,33 +147,6 @@ class RimeraBot(commands.Bot):
         except discord.DiscordException as e:
             logger.error(f"Could not send {source_key} update to channel {channel_id}: {e}")
             return False
-
-    async def send_early_shop_update(self, item):
-        subscriber_ids = config.get('initial_subscribers', [])
-        if not subscriber_ids:
-            logger.info("No /initial subscribers configured for early shop update.")
-            return 0
-
-        sent_count = 0
-        embed = self.formatter.format_item(item)
-        for user_id in subscriber_ids:
-            try:
-                user = self.get_user(int(user_id)) or await self.fetch_user(int(user_id))
-                await user.send(content=f"<@{user_id}> early shop update:", embed=embed)
-                sent_count += 1
-            except discord.DiscordException as e:
-                logger.error(f"Could not send early shop update to user {user_id}: {e}")
-
-        return sent_count
-
-    async def send_delayed_shop_channel_update(self, item):
-        await asyncio.sleep(SHOP_PUBLIC_DELAY_SECONDS)
-        await self.send_item_update('website', item)
-
-    async def handle_shop_update(self, item):
-        early_count = await self.send_early_shop_update(item)
-        logger.info(f"Sent early shop update to {early_count} subscriber(s).")
-        asyncio.create_task(self.send_delayed_shop_channel_update(item))
 
     @tasks.loop(minutes=config.get('polling_interval_minutes', 5))
     async def polling_loop(self):
@@ -204,16 +184,15 @@ class RimeraBot(commands.Bot):
             products = await asyncio.to_thread(self.website_scraper.get_latest_products)
             updates = self.state_manager.get_product_updates(products)
             for product in updates:
-                await self.handle_shop_update(product)
+                await self.send_item_update('website', product)
         except Exception as e:
             logger.error(f"Error in Website polling: {e}")
 
     async def poll_social_sources(self):
         source_checks = [
+            ('tumblr', 'Tumblr', self.social_scraper.get_tumblr_updates),
             ('instagram', 'Instagram', self.social_scraper.get_instagram_updates),
             ('spotify', 'Spotify', self.social_scraper.get_spotify_updates),
-            ('apple_music', 'Apple Music', self.social_scraper.get_apple_music_updates),
-            ('soundcloud', 'SoundCloud', self.social_scraper.get_soundcloud_updates),
             ('youtube', 'YouTube', self.social_scraper.get_youtube_updates),
         ]
 
@@ -257,16 +236,28 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Website", value=bot.website_scraper.url, inline=False)
     embed.add_field(name="Twitter", value=f"@{bot.twitter_scraper.handle}", inline=True)
     embed.add_field(name="TikTok", value=f"@{bot.tiktok_scraper.handle}", inline=True)
-    embed.add_field(name="Linktree", value=config.get('linktree_url') or "Not set", inline=False)
+    embed.add_field(name="Tumblr", value=config.get('tumblr_url') or "Not set", inline=False)
     embed.add_field(name="Instagram", value=config.get('instagram_url') or "Not set", inline=False)
     embed.add_field(name="Spotify", value=config.get('spotify_url') or "Not set", inline=False)
-    embed.add_field(name="Apple Music", value=config.get('apple_music_url') or "Not set", inline=False)
-    embed.add_field(name="SoundCloud", value=config.get('soundcloud_url') or "Not set", inline=False)
     embed.add_field(name="YouTube", value=config.get('youtube_url') or config.get('youtube_channel_id') or "Not set", inline=False)
     embed.add_field(name="Polling", value=f"{config.get('polling_interval_minutes', 5)} minutes", inline=True)
-    embed.add_field(name="Early shop alerts", value=f"{len(config.get('initial_subscribers', []))} subscriber(s)", inline=True)
     embed.add_field(name="Channels", value=bot.configured_channel_mentions(), inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="invite", description="Get an invite link for the bot")
+async def invite(interaction: discord.Interaction):
+    app_id = "1507078816047300668"
+    invite_url = f"https://discord.com/api/oauth2/authorize?client_id={app_id}&permissions=8&scope=bot%20applications.commands"
+    await interaction.response.send_message(f"Invite me to your server: {invite_url}", ephemeral=True)
+
+
+@bot.tree.command(name="donate", description="Support the bot's hosting and development")
+async def donate(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "Donations are only used to help run and maintain the bot via PayPal: https://bit.ly/49figis",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="channels", description="Show where each update type is posted")
@@ -291,12 +282,6 @@ async def set_website_channel(interaction: discord.Interaction, channel: discord
     await set_source_channel(interaction, 'website', channel)
 
 
-@bot.tree.command(name="set-shop-channel", description="Set the shop product and restock update channel")
-@app_commands.checks.has_permissions(administrator=True)
-async def set_shop_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'website', channel)
-
-
 @bot.tree.command(name="set-twitter-channel", description="Set the Twitter update channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_twitter_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -307,6 +292,12 @@ async def set_twitter_channel(interaction: discord.Interaction, channel: discord
 @app_commands.checks.has_permissions(administrator=True)
 async def set_tiktok_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_source_channel(interaction, 'tiktok', channel)
+
+
+@bot.tree.command(name="set-tumblr-channel", description="Set the Tumblr update channel")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_tumblr_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_source_channel(interaction, 'tumblr', channel)
 
 
 @bot.tree.command(name="set-instagram-channel", description="Set the Instagram update channel")
@@ -321,40 +312,33 @@ async def set_spotify_channel(interaction: discord.Interaction, channel: discord
     await set_source_channel(interaction, 'spotify', channel)
 
 
-@bot.tree.command(name="set-apple-music-channel", description="Set the Apple Music update channel")
-@app_commands.checks.has_permissions(administrator=True)
-async def set_apple_music_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'apple_music', channel)
-
-
-@bot.tree.command(name="set-soundcloud-channel", description="Set the SoundCloud update channel")
-@app_commands.checks.has_permissions(administrator=True)
-async def set_soundcloud_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'soundcloud', channel)
-
-
 @bot.tree.command(name="set-youtube-channel", description="Set the YouTube update channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_youtube_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_source_channel(interaction, 'youtube', channel)
 
 
-@bot.tree.command(name="initial", description="Register for private early shop alerts")
-async def initial(interaction: discord.Interaction, password: str):
-    if password != config.get('initial_password', 'Phone118'):
-        await interaction.response.send_message("Incorrect password.", ephemeral=True)
-        return
-
-    subscriber_id = str(interaction.user.id)
-    subscribers = config.setdefault('initial_subscribers', [])
-    if subscriber_id not in subscribers:
-        subscribers.append(subscriber_id)
-        save_config()
-        message = "You are registered for private early shop alerts."
-    else:
-        message = "You are already registered for private early shop alerts."
-
-    await interaction.response.send_message(message, ephemeral=True)
+@bot.tree.command(name="set-social-url", description="Set a social profile URL to monitor")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(source=[
+    app_commands.Choice(name="Tumblr", value="tumblr_url"),
+    app_commands.Choice(name="Instagram", value="instagram_url"),
+    app_commands.Choice(name="Spotify", value="spotify_url"),
+    app_commands.Choice(name="YouTube", value="youtube_url"),
+])
+async def set_social_url(
+    interaction: discord.Interaction,
+    source: app_commands.Choice[str],
+    url: str
+):
+    config[source.value] = url.strip()
+    if source.value == 'youtube_url':
+        config['youtube_channel_id'] = ''
+    save_config()
+    await interaction.response.send_message(
+        f"{source.name} monitoring URL set to {url}.",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="check-products", description="Check rimerarimera.com now for new or restocked products")
@@ -366,25 +350,24 @@ async def check_products(interaction: discord.Interaction):
 
     sent_count = 0
     for product in updates:
-        sent_count += await bot.send_early_shop_update(product)
-        asyncio.create_task(bot.send_delayed_shop_channel_update(product))
+        if await bot.send_item_update('website', product):
+            sent_count += 1
 
     await interaction.followup.send(
-        f"Checked {len(products)} products. Sent {sent_count} early alert(s). Shop channel updates will post 2 minutes later.",
+        f"Checked {len(products)} products. Sent {sent_count} product update(s).",
         ephemeral=True
     )
 
 
-@bot.tree.command(name="check-socials", description="Check Linktree-listed social and music pages now")
+@bot.tree.command(name="check-socials", description="Check Tumblr, Instagram, Spotify, and YouTube now")
 @app_commands.checks.has_permissions(administrator=True)
 async def check_socials(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     source_checks = [
+        ('tumblr', 'Tumblr', bot.social_scraper.get_tumblr_updates),
         ('instagram', 'Instagram', bot.social_scraper.get_instagram_updates),
         ('spotify', 'Spotify', bot.social_scraper.get_spotify_updates),
-        ('apple_music', 'Apple Music', bot.social_scraper.get_apple_music_updates),
-        ('soundcloud', 'SoundCloud', bot.social_scraper.get_soundcloud_updates),
         ('youtube', 'YouTube', bot.social_scraper.get_youtube_updates),
     ]
     checked_count = 0
