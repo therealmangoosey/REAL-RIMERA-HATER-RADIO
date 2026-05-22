@@ -1,7 +1,6 @@
 # Real Rimera Hater Radio Bot
 
 A Discord bot that watches Rimera-related shops and socials, then posts clean Discord embeds when it finds new updates.
-https://github.com/therealmangoosey/REAL-RIMERA-HATER-RADIO.git
 
 ## What It Does
 
@@ -148,7 +147,7 @@ The first time the bot sees a source, it saves the current items to `cache.json`
 - New products are announced.
 - Products that change from sold out to in stock are announced as restocks.
 - Users who registered with `/initial` get a private early shop alert immediately.
-- The configured website/shop update channel gets the same shop update 2 minutes later.
+- The configured website/shop update channel gets the same shop update 2 minutes later (manual `/check-products` posts immediately).
 - New feed items from YouTube are announced.
 - Instagram, Spotify, Apple Music, and SoundCloud are checked for visible public metadata/page changes.
 - Twitter/X and TikTok are checked for newly discovered posts/videos.
