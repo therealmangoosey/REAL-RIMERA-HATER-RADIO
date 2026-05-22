@@ -1,6 +1,7 @@
 # Real Rimera Hater Radio Bot
 
 A Discord bot that watches Rimera-related shops and socials, then posts clean Discord embeds when it finds new updates.
+https://github.com/therealmangoosey/REAL-RIMERA-HATER-RADIO.git
 
 ## What It Does
 
