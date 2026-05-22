@@ -9,7 +9,18 @@ class WebsiteScraper:
     def __init__(self, url="https://rimerarimera.com"):
         self.url = url.rstrip('/')
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
         }
 
     def get_latest_products(self):
@@ -23,7 +34,10 @@ class WebsiteScraper:
         try:
             target_url = f"{self.url}/products.json?limit=250"
             logger.info(f"Scraping Shopify products endpoint: {target_url}")
-            response = requests.get(target_url, timeout=15, headers=self.headers)
+            # Use a session for better connection handling
+            session = requests.Session()
+            session.headers.update(self.headers)
+            response = session.get(target_url, timeout=15)
 
             if response.status_code != 200:
                 logger.warning(f"Failed to scrape products endpoint: Status {response.status_code}")
@@ -68,7 +82,9 @@ class WebsiteScraper:
         try:
             logger.info(f"Scraping collection page: {self.url}")
             target_url = f"{self.url}/collections/all"
-            response = requests.get(target_url, timeout=15, headers=self.headers)
+            session = requests.Session()
+            session.headers.update(self.headers)
+            response = session.get(target_url, timeout=15)
 
             if response.status_code != 200:
                 logger.warning(f"Failed to scrape collection page: Status {response.status_code}")
