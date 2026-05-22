@@ -493,13 +493,18 @@ async def check_products(interaction: discord.Interaction):
     products = await asyncio.to_thread(bot.website_scraper.get_latest_products)
     updates = bot.state_manager.get_product_updates(products)
 
+    if not products:
+        await interaction.followup.send("No products found on the website. The shop might be locked or down.")
+        return
+
     sent_count = 0
     for product in updates:
         sent_count += await bot.send_early_shop_update(product)
-        asyncio.create_task(bot.send_delayed_shop_channel_update(product))
+        # Post immediately for manual checks to verify channel config
+        await bot.send_item_update('website', product)
 
     await interaction.followup.send(
-        f"Checked {len(products)} products. Sent {sent_count} early alert(s). Shop channel updates will post 2 minutes later."
+        f"Checked {len(products)} products. Sent {sent_count} early alert(s) and posted updates to the shop channel."
     )
 
 
