@@ -9,7 +9,7 @@ A Discord bot that watches Rimera-related shops and socials, then posts clean Di
 - Tracks Rimera social/music links from the Linktree source of truth.
 - Automatically downloads public media links with `yt-dlp` in a selected Discord channel and replies to the original message with the downloaded media.
 - Instagram carousel posts and other multi-media Instagram URLs are downloaded as multiple media items where yt-dlp can access them.
-- Instagram Story URLs are supported when the bot has an authenticated Instagram cookies file for an account allowed to view the Story.
+- Instagram Story URLs are handled with an anonymous-first fallback chain.
 - Sends a multi-media result in one Discord reply when Discord's attachment limit allows it; excess items use the bot's private fallback rather than being zipped.
 - Keeps a local `cache.json` so old posts/products are not repeatedly announced.
 - Requires the Discord token to be stored in `.env`, not `config.json`.
@@ -84,40 +84,37 @@ or an Instagram Story URL can be dropped into the configured channel. The bot do
 
 The downloader uses the best available video/audio formats it can access and FFmpeg when available. It does not create ZIP files. Multiple media items from a single Instagram post are sent together in one reply when possible. Discord's attachment limit is handled with the bot's private fallback.
 
-### Instagram Stories require authentication
+### Instagram Story fallback chain
 
-The error:
+For Instagram Stories the bot tries, in order:
 
-```text
-You need to log in to access this content.
-```
+1. **yt-dlp anonymously** — no cookies are used.
+2. **Free public web fallbacks** — the bot tries Download IG Story and StoriesDown for public Stories without an API key or Instagram login.
+3. **Optional authenticated cookies** — only when `instagram-cookies.txt` or `YT_DLP_COOKIES_FILE` is configured.
+4. A clear failure is reported if none of the above can access the Story.
 
-is an Instagram access restriction, not a Discord bug. yt-dlp supports passing an authenticated cookies file with `--cookies`/its Python equivalent. citeturn0search0
+The third-party fallback is intentionally a web scraper rather than an API integration, so no API key is required. The services advertise free anonymous access to public Stories and current Story feeds. citeturn756595search1turn864925search1
 
-Export a cookies file from a browser where you are already logged into Instagram. The cookies must be in Mozilla/Netscape cookies.txt format. yt-dlp documents this format and warns that cookies files contain sensitive authentication data. citeturn0search0
+These third-party sites can change their HTML or stop working, so they are treated as fallbacks rather than the primary downloader. They only work for content the service can access publicly; private Stories still require an authorized account. citeturn864925search4turn864925search9
 
-Put the file here on Termux:
+### Optional Instagram cookies
+
+Cookies are no longer required for the first attempt. They are only a last-resort fallback for Stories that Instagram refuses to expose anonymously.
+
+If you choose to use them, put a Mozilla/Netscape cookies.txt export here on Termux:
 
 ```bash
 cd ~/REAL-RIMERA-HATER-RADIO
 nano instagram-cookies.txt
 ```
 
-Paste the exported cookies into that file. **Never commit it or send it to anyone.** The repository ignores `instagram-cookies.txt` automatically.
-
-The bot automatically detects `instagram-cookies.txt` in the repo, so you normally do not need to change `.env`.
-
-Alternatively, set an explicit path:
+Or set:
 
 ```env
 YT_DLP_COOKIES_FILE=/data/data/com.termux/files/home/REAL-RIMERA-HATER-RADIO/instagram-cookies.txt
 ```
 
-If the Story is private, your Instagram account must actually be allowed to view it. Cookies cannot bypass Instagram's privacy controls.
-
-### Important Instagram limitation
-
-Instagram can change its login/anti-bot behavior, and yt-dlp's Instagram extractor can therefore stop working temporarily even with valid cookies. Current yt-dlp guidance recommends using a fresh authenticated browser session/cookies when login or anti-bot protection blocks extraction. citeturn0search0
+Never commit or share the cookies file.
 
 ## Slash Commands
 
