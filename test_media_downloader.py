@@ -4,13 +4,19 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from instagram_fallback import InstagramPublicFallback
-from media_downloader import MediaDownloader
+from media_downloader import DISCORD_FREE_LIMIT, DISCORD_SAFE_MARGIN, MediaDownloader
 
 
 class TestMediaDownloader(unittest.TestCase):
     def test_default_max_bytes_is_set(self):
         downloader = MediaDownloader()
-        self.assertEqual(downloader.max_bytes, 20 * 1024 * 1024)
+        self.assertEqual(downloader.max_bytes, DISCORD_FREE_LIMIT)
+
+    def test_safe_target_stays_just_under_limit(self):
+        self.assertEqual(
+            MediaDownloader._safe_target(DISCORD_FREE_LIMIT),
+            DISCORD_FREE_LIMIT - DISCORD_SAFE_MARGIN,
+        )
 
     def test_extract_urls_strips_punctuation(self):
         downloader = MediaDownloader()
