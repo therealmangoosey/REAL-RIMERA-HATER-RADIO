@@ -40,7 +40,18 @@ class InstagramPublicFallback:
 
     MEDIA_EXTENSIONS = (".mp4", ".jpg", ".jpeg", ".png", ".webp", ".m4v", ".mov")
     ABSOLUTE_URL_RE = re.compile(r"https?://[^\"'<>\s]+", re.IGNORECASE)
-    SERVICE_ASSET_PATHS = ("/static/", "/assets/", "/images/", "/img/", "/icons/", "/favicon", "/logo")
+    SERVICE_ASSET_PATHS = (
+        "/static/", "/assets/", "/images/", "/img/", "/icons/", "/icon/",
+        "/favicon", "/logo", "/logos/", "/css/", "/js/", "/fonts/",
+        "/uploads/site/", "/media/site/", "/screenshots/", "/screenshot/",
+    )
+    BLOCKED_ASSET_HOSTS = (
+        "googleusercontent.com", "googleapis.com", "gstatic.com", "google.com",
+        "play.google.com", "microsoft.com", "windows.net", "bing.com",
+        "apple.com", "mzstatic.com", "cloudflare.com",
+    )
+    CDN_HOST_HINTS = ("scontent", "fbcdn", "cdninstagram", "igcdn")
+    MEDIA_PATH_HINTS = ("/download", "/media", "/file", "/video", "/photo", "/image", "/story", "/reel")
 
     def __init__(self, timeout=18):
         self.timeout = timeout
@@ -59,26 +70,32 @@ class InstagramPublicFallback:
 
     @classmethod
     def _looks_like_media_url(cls, value):
+        """Strictly classify URLs; ordinary webpage images are never media."""
         if not isinstance(value, str):
             return False
-        value = html.unescape(value).replace("\\/", "/").replace("\\u0026", "&")
+        value = html.unescape(value).replace("\\/", "/").replace("\\u0026", "&").strip()
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"}:
             return False
         path = parsed.path.lower()
-        whole = value.lower()
         hostname = (parsed.hostname or "").lower()
         if any(path.startswith(prefix) for prefix in cls.SERVICE_ASSET_PATHS):
             return False
-        if any(path.endswith(ext) for ext in cls.MEDIA_EXTENSIONS):
-            if hostname.endswith(("instagram.com", "cdninstagram.com", "fbcdn.net")) or "scontent" in hostname:
-                return True
-            # A third-party downloader URL is only accepted when the path itself
-            # looks like a real media/download route; static site assets are rejected.
-            return any(token in path for token in ("/download", "/media", "/file", "/video", "/photo", "/image", "/story"))
-        return any(token in whole for token in ("scontent", "fbcdn", "cdn")) and any(
-            token in whole for token in ("image", "photo", "video", "media", "story")
-        )
+        if any(hostname == host or hostname.endswith("." + host) for host in cls.BLOCKED_ASSET_HOSTS):
+            return False
+        if any(token in path for token in ("favicon", "logo", "icon", "placeholder", "app-store", "play-store", "microsoft-store")):
+            return False
+
+        is_instagram_cdn = any(hint in hostname for hint in cls.CDN_HOST_HINTS) or hostname.endswith(("fbcdn.net", "cdninstagram.com"))
+        has_media_extension = any(path.endswith(ext) for ext in cls.MEDIA_EXTENSIONS)
+        has_media_route = any(token in path for token in cls.MEDIA_PATH_HINTS)
+
+        if is_instagram_cdn:
+            return has_media_extension or has_media_route
+        # Third-party hosts must expose a clearly media/download-oriented route.
+        # A bare JPG/PNG from a page is deliberately rejected because it is often
+        # a logo, app-store badge, thumbnail, screenshot or other site decoration.
+        return has_media_route and has_media_extension
 
     @classmethod
     def _collect_media_values(cls, value, base_url, found):
@@ -95,17 +112,22 @@ class InstagramPublicFallback:
 
     @classmethod
     def _candidate_urls(cls, response_text, base_url):
+        """Collect explicit media/download URLs, never ordinary page images."""
         found = set()
         soup = BeautifulSoup(response_text, "lxml")
 
         for tag in soup.find_all(True):
-            for attr in ("href", "src", "poster", "content", "data-src", "data-url", "data-download", "data-video", "data-image", "data-media", "data-href", "data-file"):
+            for attr in ("data-download", "data-video", "data-image", "data-media", "data-file"):
                 value = tag.get(attr)
                 if not value:
                     continue
                 absolute = urljoin(base_url, html.unescape(value))
                 if cls._looks_like_media_url(absolute):
                     found.add(absolute)
+
+        for href in cls._extract_download_links(response_text, base_url):
+            if cls._looks_like_media_url(href):
+                found.add(href)
 
         for script in soup.find_all("script"):
             text = script.string or script.get_text(" ", strip=False)
@@ -119,7 +141,6 @@ class InstagramPublicFallback:
                 cls._collect_media_values(json.loads(decoded), base_url, found)
             except Exception:
                 pass
-
         return sorted(found)
 
     @staticmethod
@@ -129,9 +150,26 @@ class InstagramPublicFallback:
         for tag in soup.find_all("a", href=True):
             href = urljoin(base_url, html.unescape(tag["href"]))
             text = " ".join(tag.stripped_strings).lower()
-            if "download" in text or "save" in text or "media" in text:
+            if any(word in text for word in ("download", "save media", "download media", "original")):
                 links.append(href)
         return list(dict.fromkeys(links))
+
+    @staticmethod
+    def _valid_media_signature(path, content_type):
+        try:
+            with open(path, "rb") as handle:
+                head = handle.read(32)
+        except OSError:
+            return False
+        if content_type == "image/jpeg":
+            return head.startswith(b"\xff\xd8\xff")
+        if content_type == "image/png":
+            return head.startswith(b"\x89PNG\r\n\x1a\n")
+        if content_type == "image/webp":
+            return head.startswith(b"RIFF") and b"WEBP" in head[:16]
+        if content_type == "video/mp4":
+            return len(head) >= 8 and head[4:8] == b"ftyp"
+        return False
 
     def _download_candidates(self, urls, output_dir, prefix):
         downloaded = []
@@ -143,26 +181,18 @@ class InstagramPublicFallback:
             try:
                 response = self.session.get(source_url, stream=True, timeout=self.timeout, allow_redirects=True)
                 response.raise_for_status()
-                content_type = (response.headers.get("content-type") or "").lower()
-                final_url = response.url
-                ext = os.path.splitext(urlparse(final_url).path)[1].lower()
-
-                if content_type.startswith("image/"):
-                    ext = ".png" if "png" in content_type else ".webp" if "webp" in content_type else ".jpg"
-                elif content_type.startswith("video/"):
-                    ext = ".mp4" if ext not in self.MEDIA_EXTENSIONS else ext
-                elif ext not in self.MEDIA_EXTENSIONS:
+                content_type = (response.headers.get("content-type") or "").lower().split(";", 1)[0].strip()
+                if content_type not in {"image/jpeg", "image/png", "image/webp", "video/mp4"}:
                     response.close()
                     continue
-
+                ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4"}[content_type]
                 output = os.path.join(output_dir, f"{prefix}-{len(downloaded)+1:03d}{ext}")
                 with open(output, "wb") as handle:
                     for chunk in response.iter_content(chunk_size=262144):
                         if chunk:
                             handle.write(chunk)
                 response.close()
-
-                if os.path.getsize(output) <= 4096:
+                if os.path.getsize(output) <= 4096 or not self._valid_media_signature(output, content_type):
                     try:
                         os.remove(output)
                     except OSError:
@@ -187,7 +217,6 @@ class InstagramPublicFallback:
         username = self.username_from_url(instagram_url)
         if not username:
             raise InstagramFallbackError("Could not determine the Instagram username from the Story URL.")
-
         errors = []
         for name, base, patterns in self.STORY_SERVICES:
             for page_url in self._visit_variants(base, patterns, username, instagram_url):
@@ -196,8 +225,6 @@ class InstagramPublicFallback:
                     if page.status_code >= 400:
                         continue
                     media = self._candidate_urls(page.text, page.url)
-                    if not media:
-                        media = self._extract_download_links(page.text, page.url)
                     if media:
                         files = self._download_candidates(media, output_dir, "instagram-story")
                         if files:
@@ -209,23 +236,22 @@ class InstagramPublicFallback:
 
     def fetch_post(self, instagram_url, output_dir):
         errors = []
-
         for name, base, patterns in self.PHOTO_SERVICES:
             for page_url in self._visit_variants(base, patterns, self.username_from_url(instagram_url) or "", instagram_url):
                 try:
                     page = self.session.get(page_url, timeout=self.timeout, allow_redirects=True)
                     if page.status_code >= 400:
                         continue
-
                     media = self._candidate_urls(page.text, page.url)
-                    download_links = self._extract_download_links(page.text, page.url)
-                    files = self._download_candidates(media + download_links, output_dir, "instagram-post")
+                    files = self._download_candidates(media, output_dir, "instagram-post")
                     if files:
                         logger.info("%s returned %d Instagram post media item(s)", name, len(files))
                         return files
                 except requests.RequestException as exc:
                     errors.append(f"{name}: {exc}")
 
+        # Instagram itself is only queried for explicit image metadata. Arbitrary
+        # page <img> tags are intentionally ignored so UI icons cannot be returned.
         for page_url in (instagram_url, instagram_url.split("?", 1)[0]):
             try:
                 page = self.session.get(page_url, timeout=self.timeout, allow_redirects=True)
@@ -234,22 +260,20 @@ class InstagramPublicFallback:
                 direct = []
                 soup = BeautifulSoup(page.text, "lxml")
                 for selector in (
-                    'meta[property="og:image"]',
-                    'meta[property="og:image:url"]',
-                    'meta[name="twitter:image"]',
-                    'meta[name="twitter:image:src"]',
+                    'meta[property="og:image"]', 'meta[property="og:image:url"]',
+                    'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]',
                 ):
                     for tag in soup.select(selector):
                         value = tag.get("content")
                         if value:
-                            direct.append(value)
-                direct.extend(self._candidate_urls(page.text, page.url))
+                            absolute = urljoin(page.url, value)
+                            if self._looks_like_media_url(absolute):
+                                direct.append(absolute)
                 files = self._download_candidates(direct, output_dir, "instagram-post")
                 if files:
                     return files
             except requests.RequestException as exc:
                 errors.append(f"instagram-direct: {exc}")
-
         raise InstagramFallbackError(" | ".join(errors) if errors else "No public post/photo fallback returned usable media.")
 
     def fetch(self, instagram_url, output_dir):
