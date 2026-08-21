@@ -6,8 +6,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
+import requests
 import yt_dlp
+from bs4 import BeautifulSoup
 
 from instagram_fallback import InstagramFallbackError, InstagramPublicStoryFallback
 
@@ -21,7 +24,7 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download media, trying anonymous yt-dlp first and public fallbacks second."""
+    """Download media, trying anonymous yt-dlp first and public Instagram fallbacks second."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
         self.max_bytes = max_bytes
@@ -29,6 +32,12 @@ class MediaDownloader:
         candidates = [configured, "instagram-cookies.txt", os.path.expanduser("~/instagram-cookies.txt")]
         self.cookies_file = next((path for path in candidates if path and os.path.isfile(path)), None)
         self.instagram_fallback = InstagramPublicStoryFallback()
+        self.http = requests.Session()
+        self.http.headers.update({
+            "User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
 
     @staticmethod
     def extract_urls(text):
@@ -76,6 +85,78 @@ class MediaDownloader:
             info = ydl.extract_info(url, download=True)
         return info, self._files(workdir)
 
+    @staticmethod
+    def _instagram_post_or_reel(url):
+        path = urlparse(url).path.lower()
+        return any(path.startswith(prefix) for prefix in ("/p/", "/reel/", "/reels/", "/tv/"))
+
+    def _instagram_photo_fallback(self, url, workdir):
+        """Recover public Instagram photos when yt-dlp has no video formats."""
+        response = self.http.get(url, timeout=18, allow_redirects=True)
+        response.raise_for_status()
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "html" not in content_type:
+            return []
+
+        soup = BeautifulSoup(response.text, "lxml")
+        candidates = []
+
+        # OpenGraph/Twitter metadata is the most stable anonymous representation
+        # for a public Instagram photo.
+        for selector in (
+            'meta[property="og:image"]',
+            'meta[property="og:image:url"]',
+            'meta[name="twitter:image"]',
+            'meta[name="twitter:image:src"]',
+        ):
+            for tag in soup.select(selector):
+                value = tag.get("content")
+                if value:
+                    candidates.append(value)
+
+        # Instagram sometimes embeds the image URL in JSON-LD or page scripts.
+        for tag in soup.find_all("script"):
+            text = tag.string or tag.get_text(" ", strip=False)
+            if not text:
+                continue
+            for match in re.findall(r'https?://[^"\\\']+', text):
+                lower = match.lower()
+                if any(token in lower for token in ("scontent", "fbcdn", "instagram")) and any(
+                    ext in lower for ext in (".jpg", ".jpeg", ".png", ".webp")
+                ):
+                    candidates.append(match.replace("\\/", "/").replace("\\u0026", "&"))
+
+        downloaded = []
+        seen = set()
+        for candidate in candidates:
+            candidate = candidate.replace("\\/", "/").replace("&amp;", "&")
+            if candidate in seen or not candidate.startswith(("http://", "https://")):
+                continue
+            seen.add(candidate)
+            try:
+                media = self.http.get(candidate, stream=True, timeout=18, allow_redirects=True)
+                media.raise_for_status()
+                media_type = (media.headers.get("content-type") or "").lower()
+                if not media_type.startswith("image/"):
+                    media.close()
+                    continue
+                extension = ".jpg"
+                if "png" in media_type:
+                    extension = ".png"
+                elif "webp" in media_type:
+                    extension = ".webp"
+                output = os.path.join(workdir, f"instagram-photo-{len(downloaded)+1:03d}{extension}")
+                with open(output, "wb") as handle:
+                    for chunk in media.iter_content(chunk_size=262144):
+                        if chunk:
+                            handle.write(chunk)
+                media.close()
+                if os.path.getsize(output) > 1024:
+                    downloaded.append(output)
+            except requests.RequestException:
+                continue
+        return downloaded
+
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
@@ -97,8 +178,19 @@ class MediaDownloader:
                 except InstagramFallbackError as exc:
                     fallback_error = str(exc)
                     logging.getLogger("rimera-bot").warning(
-                        "Instagram anonymous fallback chain failed: %s",
-                        fallback_error,
+                        "Instagram anonymous Story fallback chain failed: %s", fallback_error
+                    )
+            elif self._instagram_post_or_reel(url):
+                # A public photo post can legitimately have no video formats. Do not
+                # report that as a total failure: fetch the public image metadata instead.
+                try:
+                    files = self._instagram_photo_fallback(url, workdir)
+                    if files:
+                        return workdir, files, {"source": "anonymous-instagram-photo"}
+                except Exception as exc:
+                    fallback_error = str(exc)
+                    logging.getLogger("rimera-bot").warning(
+                        "Instagram public photo fallback failed: %s", fallback_error
                     )
 
             if self.cookies_file:
