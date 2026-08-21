@@ -81,6 +81,15 @@ class TestInstagramFallback(unittest.TestCase):
             )
         )
 
+    def test_structured_resolver_preserves_explicit_story_download_target(self):
+        payload = {
+            "story": {
+                "download": "https://media.example.invalid/story-no-extension"
+            }
+        }
+        urls = InstagramPublicFallback._structured_urls(payload)
+        self.assertEqual(urls, ["https://media.example.invalid/story-no-extension"])
+
     def test_structured_resolver_extracts_media_urls_from_json(self):
         payload = {
             "media": [
@@ -96,6 +105,23 @@ class TestInstagramFallback(unittest.TestCase):
                 "https://scontent.cdninstagram.com/v/t51.2885-15/456.mp4",
             ],
         )
+
+    def test_download_candidates_accepts_media_without_filename_extension(self):
+        fallback = InstagramPublicFallback()
+        response = Mock()
+        response.status_code = 200
+        response.url = "https://media.example.invalid/story-no-extension"
+        response.headers = {"content-type": "video/mp4"}
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [b"0000ftyp", b"x" * 5000]
+        fallback.session.get = Mock(return_value=response)
+
+        with TemporaryDirectory() as temp_dir:
+            files = fallback._download_candidates(
+                [response.url], temp_dir, "story", allow_unclassified=True
+            )
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].endswith(".mp4"))
 
     def test_download_candidates_rejects_html(self):
         fallback = InstagramPublicFallback()
