@@ -18,7 +18,7 @@ class InstagramFallbackError(Exception):
 class InstagramPublicFallback:
     """Anonymous Instagram fallback.
 
-    Structured resolver first; webpage scraping only as a last resort.
+    Uses a structured public resolver first; webpage scraping is only a last resort for Stories.
     """
 
     STRUCTURED_RESOLVER = "https://www.smdownloader.com/api/extract"
@@ -82,6 +82,7 @@ class InstagramPublicFallback:
     @classmethod
     def _extract_urls_from_json(cls, payload):
         found = []
+
         def walk(value):
             if isinstance(value, dict):
                 for child in value.values():
@@ -96,6 +97,7 @@ class InstagramPublicFallback:
                         found.append(match)
                 if cls._looks_like_media_url(cleaned):
                     found.append(cleaned)
+
         walk(payload)
         return list(dict.fromkeys(found))
 
@@ -151,20 +153,38 @@ class InstagramPublicFallback:
         return False
 
     def _structured_extract(self, instagram_url, output_dir, prefix):
-        response = self.session.post(
-            self.STRUCTURED_RESOLVER,
-            json={"url": instagram_url},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        urls = self._extract_urls_from_json(payload)
-        if not urls:
-            return []
-        files = self._download_candidates(urls, output_dir, prefix)
-        if files:
-            logger.info("SMDownloader structured resolver returned %d media item(s)", len(files))
-        return files
+        responses = []
+        try:
+            responses.append(self.session.post(
+                self.STRUCTURED_RESOLVER,
+                json={"url": instagram_url},
+                timeout=self.timeout,
+            ))
+        except requests.RequestException:
+            pass
+        try:
+            responses.append(self.session.get(
+                self.STRUCTURED_RESOLVER,
+                params={"url": instagram_url},
+                timeout=self.timeout,
+            ))
+        except requests.RequestException:
+            pass
+
+        for response in responses:
+            try:
+                response.raise_for_status()
+                payload = response.json()
+            except (requests.RequestException, ValueError):
+                continue
+            urls = self._extract_urls_from_json(payload)
+            if not urls:
+                continue
+            files = self._download_candidates(urls, output_dir, prefix)
+            if files:
+                logger.info("SMDownloader structured resolver returned %d media item(s)", len(files))
+                return files
+        return []
 
     def _visit_variants(self, base, patterns, username, instagram_url):
         return [
@@ -176,44 +196,36 @@ class InstagramPublicFallback:
         ]
 
     def _page_fallback(self, instagram_url, output_dir, prefix):
-        """Last-resort page fallback. Only explicit download/media links are used."""
-        errors = []
+        """Last-resort Story page fallback. Only explicit download/media links are used."""
         username = self.username_from_url(instagram_url)
-        variants = []
         for name, base, patterns in self.STORY_SERVICES:
-            variants.extend((name, page) for page in self._visit_variants(base, patterns, username, instagram_url))
-
-        for name, page_url in variants:
-            try:
-                page = self.session.get(page_url, timeout=self.timeout, allow_redirects=True)
-                if page.status_code >= 400:
-                    continue
-                soup = BeautifulSoup(page.text, "lxml")
-                links = []
-                for tag in soup.find_all("a", href=True):
-                    label = " ".join(tag.stripped_strings).lower()
-                    if not any(word in label for word in ("download", "save media", "download media", "original")):
+            for page_url in self._visit_variants(base, patterns, username, instagram_url):
+                try:
+                    page = self.session.get(page_url, timeout=self.timeout, allow_redirects=True)
+                    if page.status_code >= 400:
                         continue
-                    href = urljoin(page.url, html.unescape(tag["href"]))
-                    if self._looks_like_media_url(href):
-                        links.append(href)
-                files = self._download_candidates(links, output_dir, prefix)
-                if files:
-                    logger.info("%s page fallback returned %d media item(s)", name, len(files))
-                    return files
-            except requests.RequestException as exc:
-                errors.append(f"{name}: {exc}")
+                    soup = BeautifulSoup(page.text, "lxml")
+                    links = []
+                    for tag in soup.find_all("a", href=True):
+                        label = " ".join(tag.stripped_strings).lower()
+                        if not any(word in label for word in ("download", "save media", "download media", "original")):
+                            continue
+                        href = urljoin(page.url, html.unescape(tag["href"]))
+                        if self._looks_like_media_url(href):
+                            links.append(href)
+                    files = self._download_candidates(links, output_dir, prefix)
+                    if files:
+                        logger.info("%s page fallback returned %d media item(s)", name, len(files))
+                        return files
+                except requests.RequestException:
+                    continue
         return []
 
     def fetch(self, instagram_url, output_dir):
         prefix = "instagram-story" if "/stories/" in instagram_url.lower() else "instagram-post"
-        try:
-            files = self._structured_extract(instagram_url, output_dir, prefix)
-            if files:
-                return files
-        except (requests.RequestException, ValueError) as exc:
-            logger.warning("SMDownloader structured resolver failed for %s: %s", instagram_url, exc)
-
+        files = self._structured_extract(instagram_url, output_dir, prefix)
+        if files:
+            return files
         if "/stories/" in instagram_url.lower():
             files = self._page_fallback(instagram_url, output_dir, prefix)
             if files:
