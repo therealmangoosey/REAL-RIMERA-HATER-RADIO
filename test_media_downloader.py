@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from instagram_fallback import InstagramPublicFallback
 from media_downloader import DISCORD_FREE_LIMIT, DISCORD_SAFE_MARGIN, MediaDownloader
+from story_endpoint_fallback import StoryEndpointFallback
 
 
 class TestMediaDownloader(unittest.TestCase):
@@ -136,6 +137,25 @@ class TestInstagramFallback(unittest.TestCase):
             files = fallback._download_candidates(["https://example.com/result"], temp_dir, "test")
             self.assertEqual(files, [])
             self.assertEqual(os.listdir(temp_dir), [])
+
+
+class TestStoryEndpointFallback(unittest.TestCase):
+    def test_story_url_parser_extracts_username_and_story_id(self):
+        url = "https://www.instagram.com/stories/rimeraera/3968891156947555281?igsh=abc"
+        self.assertEqual(StoryEndpointFallback.username_from_url(url), "rimeraera")
+        self.assertEqual(StoryEndpointFallback._story_id(url), "3968891156947555281")
+
+    def test_collect_media_urls_keeps_explicit_media_fields(self):
+        payload = {
+            "result": {"download_url": "https://media.example.invalid/story-token"},
+            "thumbnail": "https://example.com/logo.png",
+        }
+        urls = StoryEndpointFallback._collect_media_urls(payload)
+        self.assertEqual(urls, ["https://media.example.invalid/story-token"])
+
+    def test_media_url_rejects_site_assets(self):
+        self.assertFalse(StoryEndpointFallback._is_media_url("https://example.com/assets/logo.png"))
+        self.assertTrue(StoryEndpointFallback._is_media_url("https://cdninstagram.com/story/123.mp4"))
 
 
 if __name__ == "__main__":
