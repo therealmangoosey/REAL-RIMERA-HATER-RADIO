@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
+import parth_dl
 import yt_dlp
 
 from instagram_fallback import InstagramFallbackError, InstagramPublicFallback
@@ -23,7 +23,7 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download media with platform-specific fallbacks."""
+    """Download public media with platform-specific, validated fallbacks."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
         self.max_bytes = max_bytes
@@ -38,7 +38,8 @@ class MediaDownloader:
 
     @staticmethod
     def _is_instagram(url):
-        return "instagram.com/" in url.lower() or "instagr.am/" in url.lower()
+        lowered = url.lower()
+        return "instagram.com/" in lowered or "instagr.am/" in lowered
 
     @staticmethod
     def _is_instagram_story(url):
@@ -83,6 +84,36 @@ class MediaDownloader:
             info = ydl.extract_info(url, download=True)
         return info, self._files(workdir)
 
+    def _parth_dl_fallback(self, url, workdir):
+        """Use parth-dl for public Instagram posts, reels and carousels."""
+        try:
+            result = parth_dl.download(
+                url,
+                output_path=workdir,
+                quality="best",
+                verbose=False,
+            )
+        except Exception as exc:
+            logging.getLogger("rimera-bot").warning(
+                "parth-dl Instagram fallback failed for %s: %s", url, exc
+            )
+            return []
+
+        if result is None:
+            return []
+        if isinstance(result, (str, os.PathLike)):
+            candidates = [os.fspath(result)]
+        else:
+            candidates = [os.fspath(item) for item in result if isinstance(item, (str, os.PathLike))]
+
+        valid = []
+        for path in candidates:
+            if not os.path.isabs(path):
+                path = os.path.join(workdir, path)
+            if os.path.isfile(path) and os.path.getsize(path) > 4096:
+                valid.append(path)
+        return sorted(set(valid))
+
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
@@ -98,51 +129,37 @@ class MediaDownloader:
 
             fallback_error = None
 
-            if self._is_instagram_story(url) or self._instagram_post_or_reel(url):
+            if self._is_instagram_story(url):
                 try:
                     files = self.instagram_fallback.fetch(url, workdir)
                     if files:
-                        return workdir, files, {"source": "anonymous-instagram-fallback"}
+                        return workdir, files, {"source": "anonymous-instagram-story-fallback"}
                 except InstagramFallbackError as exc:
                     fallback_error = str(exc)
                     logging.getLogger("rimera-bot").warning(
-                        "Instagram anonymous fallback chain failed: %s", fallback_error
+                        "Instagram anonymous Story fallback chain failed: %s", fallback_error
                     )
+            elif self._instagram_post_or_reel(url):
+                files = self._parth_dl_fallback(url, workdir)
+                if files:
+                    logging.getLogger("rimera-bot").info(
+                        "parth-dl returned %d Instagram post media item(s)", len(files)
+                    )
+                    return workdir, files, {"source": "parth-dl-instagram-fallback"}
+                fallback_error = "parth-dl returned no usable media"
 
-            if self.cookies_file:
+            if self.cookies_file and self._is_instagram(url):
                 try:
                     info, files = self._extract(url, workdir, use_cookies=True)
                     if files:
                         return workdir, files, info
                 except Exception as cookie_error:
-                    if self._is_instagram_story(url):
-                        raise MediaDownloadError(
-                            "Instagram Story could not be downloaded. "
-                            f"Anonymous yt-dlp: {anonymous_error}. "
-                            f"Public fallbacks: {fallback_error or 'none returned media'}. "
-                            f"Authenticated session: {cookie_error}"
-                        ) from cookie_error
-                    if self._instagram_post_or_reel(url):
-                        raise MediaDownloadError(
-                            "Instagram post/reel could not be downloaded. "
-                            f"yt-dlp: {anonymous_error}. "
-                            f"Public fallbacks: {fallback_error or 'none returned media'}. "
-                            f"Authenticated session: {cookie_error}"
-                        ) from cookie_error
+                    fallback_error = f"{fallback_error or 'public fallbacks failed'}; authenticated session: {cookie_error}"
 
-            if self._is_instagram_story(url):
-                raise MediaDownloadError(
-                    "Instagram Story could not be downloaded. "
-                    f"Anonymous yt-dlp: {anonymous_error}. "
-                    f"Public fallbacks: {fallback_error or 'no fallback media returned'}."
-                )
-            if self._instagram_post_or_reel(url):
-                raise MediaDownloadError(
-                    "Instagram post/reel could not be downloaded. "
-                    f"yt-dlp: {anonymous_error}. "
-                    f"Public fallbacks: {fallback_error or 'no fallback media returned'}."
-                )
-            raise MediaDownloadError(f"No media was returned by yt-dlp: {anonymous_error}")
+            raise MediaDownloadError(
+                f"Instagram media could not be downloaded. yt-dlp: {anonymous_error}. "
+                f"Fallback: {fallback_error or 'no fallback returned media'}."
+            )
         except MediaDownloadError:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
