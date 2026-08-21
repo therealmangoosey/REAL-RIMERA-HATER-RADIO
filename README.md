@@ -36,7 +36,7 @@ python -m venv .venv
 
 3. Activate it and install the dependencies for your platform.
 
-Windows/Linux:
+Linux/macOS:
 
 ```bash
 source .venv/bin/activate
@@ -62,7 +62,7 @@ Do not commit `.env`. It is ignored by `.gitignore`.
 
 The bot has a dedicated lightweight Termux dependency file and startup script. You do **not** need Selenium/Chrome just to run the bot on Termux.
 
-Install Termux from a trusted/current source, then run:
+Install Termux packages:
 
 ```bash
 pkg update && pkg upgrade
@@ -76,7 +76,7 @@ git clone https://github.com/therealmangoosey/REAL-RIMERA-HATER-RADIO.git
 cd REAL-RIMERA-HATER-RADIO
 ```
 
-Create the environment file:
+Create `.env`:
 
 ```bash
 nano .env
@@ -88,41 +88,35 @@ Put your token in it:
 DISCORD_TOKEN=your_actual_discord_bot_token_here
 ```
 
-Then start the bot:
+Start the bot:
 
 ```bash
 bash termux-start.sh
 ```
 
-The script automatically:
+The script creates `.venv`, installs `requirements-termux.txt`, checks FFmpeg, enables a wake lock when available, and starts `bot.py`.
 
-- creates a Python virtual environment;
-- installs `requirements-termux.txt`;
-- checks for FFmpeg;
-- uses `termux-wake-lock` when available so Android is less likely to suspend the process;
-- starts `bot.py`.
+### One-command Termux update
 
-### Termux updates
-
-Stop the bot with `CTRL+C`, then:
+From the repo directory, use:
 
 ```bash
-cd ~/REAL-RIMERA-HATER-RADIO
-git pull origin main
-bash termux-start.sh
+bash update-termux.sh
 ```
 
-The Termux dependency file intentionally leaves out Selenium and `webdriver-manager`, because those require a browser/driver setup that is unnecessary for the main bot and media downloader. TikTok's optional browser fallback will simply be skipped if it cannot run.
+That updater backs up `.env`, `config.json`, `cache.json`, and `instagram-cookies.txt`, syncs the working tree to the latest `origin/main`, restores those local files, updates Termux Python dependencies, compiles the bot to catch syntax errors, and starts it again.
+
+**Do not use `git reset --hard origin/main` manually** if you need to preserve your local `.env` or `config.json`; use `bash update-termux.sh` instead.
 
 ### Keep Termux running
 
 Android may kill long-running background processes. For the most reliable setup:
 
-- keep Termux battery optimisation disabled for Termux in Android settings;
-- use `termux-wake-lock` while the bot is running;
+- disable battery optimisation for Termux in Android settings;
+- keep Termux awake while the bot is running;
 - keep the device powered if this is being used as a 24/7 bot host.
 
-The included `termux-start.sh` handles the wake lock automatically when `termux-api` is available.
+The included `termux-start.sh` uses `termux-wake-lock` when it is available.
 
 ## Media Downloader Requirements
 
@@ -188,7 +182,14 @@ bash termux-start.sh
 
 Do not delete `config.json` or `.env`.
 
-Linux/Windows:
+Termux safest update:
+
+```bash
+cd ~/REAL-RIMERA-HATER-RADIO
+bash update-termux.sh
+```
+
+Linux/macOS:
 
 ```bash
 git pull origin main
@@ -199,15 +200,6 @@ python bot.py
 ```
 
 Windows PowerShell uses `.\.venv\Scripts\Activate.ps1` instead of `source .venv/bin/activate`.
-
-Termux:
-
-```bash
-git pull origin main
-bash termux-start.sh
-```
-
-`termux-start.sh` installs the current Termux dependencies automatically.
 
 ## Configuration
 
@@ -286,6 +278,8 @@ Run:
 python -m unittest discover -v
 python -m compileall bot.py media_downloader.py discord_formatter.py state_manager.py scrapers
 ```
+
+The Termux updater runs the compile check automatically before starting the bot.
 
 ## Notes
 
