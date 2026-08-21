@@ -6,3 +6,4 @@ flask
 lxml
 webdriver-manager
 python-dotenv
+yt-dlp>=2026.7.4,<2026.8
