@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from discord_formatter import DiscordFormatter
-from media_downloader import DISCORD_MAX_ATTACHMENTS, MediaDownloader, MediaDownloadError
+from media_downloader import DISCORD_FREE_LIMIT, DISCORD_MAX_ATTACHMENTS, MediaDownloader, MediaDownloadError
 from scrapers.social_scraper import SocialScraper
 from scrapers.tiktok_scraper import TikTokScraper
 from scrapers.twitter_scraper import TwitterScraper
@@ -36,6 +36,7 @@ SOURCE_LABELS = {
     'tumblr': 'Tumblr',
 }
 SUPER_ADMIN_ID = 1300260018691637308
+SHOP_PUBLIC_DELAY_SECONDS = 120
 
 
 def is_admin_or_super_user():
@@ -44,9 +45,6 @@ def is_admin_or_super_user():
             return True
         return interaction.user.guild_permissions.administrator
     return app_commands.check(predicate)
-
-
-SHOP_PUBLIC_DELAY_SECONDS = 120
 
 
 def load_config():
@@ -58,13 +56,12 @@ def load_config():
     loaded_config.setdefault('media_download_channel_id', None)
     loaded_config.setdefault('website_url', 'https://rimerarimera.com')
     loaded_config.setdefault('linktree_url', 'https://linktr.ee/rimerarimera')
-    loaded_config.setdefault('instagram_url', 'https://instagram.com/rimeraera?igshid=YTM0ZjI4ZDI=')
-    loaded_config.setdefault('spotify_url', 'https://open.spotify.com/artist/3HgzwrhMXuElbeBBWJ1d38?si=90d_vXIFSiCDkBjAGG0FyA')
-    loaded_config.setdefault('apple_music_url', 'https://music.apple.com/gb/artist/rimera/1478454603')
-    loaded_config.setdefault('soundcloud_url', 'https://soundcloud.app.goo.gl/HuhB6bRZBe9Qutt68')
-    loaded_config.setdefault('youtube_url', 'https://youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
-    loaded_config.setdefault('youtube_channel_id', 'UCeliKm-RLwRJNWJLOhv3lNw')
-    loaded_config.setdefault('tumblr_url', '')
+    loaded_config.setdefault('instagram_url', 'https://instagram.com/rimeraera')
+    loaded_config.setdefault('spotify_url', '')
+    loaded_config.setdefault('apple_music_url', '')
+    loaded_config.setdefault('soundcloud_url', '')
+    loaded_config.setdefault('youtube_url', '')
+    loaded_config.setdefault('youtube_channel_id', '')
     loaded_config.setdefault('initial_password', 'CHANGE_ME')
     loaded_config.setdefault('initial_subscribers', [])
     return loaded_config
@@ -128,21 +125,64 @@ class RimeraBot(commands.Bot):
     def _make_discord_files(paths):
         return [discord.File(path, filename=os.path.basename(path)) for path in paths]
 
+    async def _send_private_media(self, user, path, message_text, fallback_limit=10_000_000):
+        """Send one file per DM, adapting to Discord's effective upload limit."""
+        candidates = [path]
+        compressed = await asyncio.to_thread(
+            self.media_downloader.fit_for_discord,
+            path,
+            DISCORD_FREE_LIMIT,
+        )
+        if compressed and compressed != path:
+            candidates.insert(0, compressed)
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                await user.send(
+                    content=message_text,
+                    file=discord.File(candidate, filename=os.path.basename(candidate)),
+                )
+                return True
+            except discord.HTTPException as exc:
+                last_error = exc
+                if exc.status != 413:
+                    break
+
+        # Some accounts/contexts can still enforce the older 10 MB ceiling.
+        compressed_10mb = await asyncio.to_thread(
+            self.media_downloader.fit_for_discord,
+            path,
+            fallback_limit,
+        )
+        if compressed_10mb:
+            try:
+                await user.send(
+                    content=f"{message_text} I used the stricter 10 MB limit after Discord rejected the first upload.",
+                    file=discord.File(compressed_10mb, filename=os.path.basename(compressed_10mb)),
+                )
+                return True
+            except discord.HTTPException as exc:
+                last_error = exc
+
+        logger.warning("Could not privately send %s: %s", path, last_error)
+        return False
+
     async def download_media_reply(self, message, urls):
         prepared_paths = []
         workdirs = []
         failed = []
+        oversized = []
         try:
             for url in urls:
                 try:
                     workdir, downloaded, _ = await asyncio.to_thread(self.media_downloader.download, url)
                     workdirs.append(workdir)
                     for path in downloaded:
-                        fitted = await asyncio.to_thread(self.media_downloader.fit_for_discord, path)
-                        if fitted:
-                            prepared_paths.append(fitted)
-                        else:
-                            failed.append(url)
+                        if os.path.getsize(path) > self.media_downloader.max_bytes:
+                            oversized.append((path, url))
+                            continue
+                        prepared_paths.append(path)
                 except MediaDownloadError as exc:
                     logger.warning(f"Could not download {url}: {exc}")
                     failed.append(url)
@@ -150,7 +190,16 @@ class RimeraBot(commands.Bot):
                     logger.exception(f"Unexpected media download error for {url}: {exc}")
                     failed.append(url)
 
-            if not prepared_paths:
+            compressed_paths = []
+            for path, url in oversized:
+                fitted = await asyncio.to_thread(self.media_downloader.fit_for_discord, path)
+                if fitted:
+                    compressed_paths.append((fitted, url, path))
+                else:
+                    failed.append(url)
+
+            all_ready = prepared_paths + [item[0] for item in compressed_paths]
+            if not all_ready:
                 if failed:
                     await message.reply(
                         "I couldn't download that link. It may be private, unsupported, unavailable, or too large for Discord.",
@@ -158,43 +207,49 @@ class RimeraBot(commands.Bot):
                     )
                 return
 
-            public_paths = prepared_paths[:DISCORD_MAX_ATTACHMENTS]
-            private_paths = prepared_paths[DISCORD_MAX_ATTACHMENTS:]
+            # Keep the normal media result together up to Discord's attachment count.
+            # Oversized files are deliberately sent separately so a single 413 cannot
+            # invalidate the rest of the batch.
+            normal_paths = [path for path in prepared_paths]
+            public_paths = normal_paths[:DISCORD_MAX_ATTACHMENTS]
+            remaining_paths = normal_paths[DISCORD_MAX_ATTACHMENTS:]
+
             text_parts = []
             if failed:
                 text_parts.append("Some links/media items could not be downloaded, but I got the rest.")
+            if public_paths:
+                await message.reply(
+                    content=" ".join(text_parts) or None,
+                    files=self._make_discord_files(public_paths),
+                    mention_author=False,
+                )
+            elif text_parts:
+                await message.reply(content=" ".join(text_parts), mention_author=False)
 
-            await message.reply(
-                content=" ".join(text_parts) or None,
-                files=self._make_discord_files(public_paths),
-                mention_author=False,
-            )
-
-            if private_paths:
+            # Any normal overflow is sent one message at a time too.
+            for path in remaining_paths:
                 try:
-                    user = message.author
-                    for start in range(0, len(private_paths), DISCORD_MAX_ATTACHMENTS):
-                        batch = private_paths[start:start + DISCORD_MAX_ATTACHMENTS]
-                        await user.send(
-                            content="Extra media from your download request:",
-                            files=self._make_discord_files(batch),
-                        )
-                    await message.reply(
-                        content="The extra media was sent to you privately.",
-                        mention_author=False,
+                    await message.author.send(
+                        content="Extra media from your download request:",
+                        file=discord.File(path, filename=os.path.basename(path)),
                     )
-                except discord.Forbidden:
-                    logger.warning(f"Could not DM media to user {message.author.id}; DMs are closed or blocked.")
-                    await message.reply(
-                        content="I couldn't privately send the extra media because your DMs are closed or blocked.",
-                        mention_author=False,
-                    )
-                except discord.DiscordException as exc:
-                    logger.warning(f"Could not privately send extra media to user {message.author.id}: {exc}")
-                    await message.reply(
-                        content="I downloaded the extra media, but Discord wouldn't let me send it privately.",
-                        mention_author=False,
-                    )
+                except discord.HTTPException as exc:
+                    logger.warning("Could not privately send overflow file %s: %s", path, exc)
+
+            # Every file that originally exceeded Discord's configured limit gets its
+            # own message and a precise explanation of why it was recompressed.
+            for fitted, url, original in compressed_paths:
+                original_size = os.path.getsize(original)
+                compressed_size = os.path.getsize(fitted)
+                limit_mb = self.media_downloader.max_bytes / 1_000_000
+                note = (
+                    f"Compressed this file to {compressed_size / 1_000_000:.2f} MB "
+                    f"to fit Discord's {limit_mb:.0f} MB upload limit while preserving as much quality as possible."
+                )
+                sent = await self._send_private_media(message.author, fitted, note)
+                if not sent:
+                    logger.warning("Oversized media could not be privately delivered: %s (original %.2f MB)", url, original_size / 1_000_000)
+
         finally:
             for workdir in workdirs:
                 self.media_downloader.cleanup(workdir)
@@ -325,44 +380,6 @@ class RimeraBot(commands.Bot):
         await self.wait_until_ready()
 
 
-class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
-    rec_title = discord.ui.TextInput(label='Feature or Page Name', placeholder='e.g. Dark Mode, Gallery Page', required=True)
-    description = discord.ui.TextInput(label='Details', style=discord.TextStyle.paragraph, placeholder='Describe your suggestion for rimera.vercel.app...', required=True)
-
-    def __init__(self, attachment: discord.Attachment = None):
-        super().__init__()
-        self.attachment = attachment
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        target_channel_id = 1507095977251700796
-        channel = interaction.client.get_channel(target_channel_id)
-        if not channel:
-            try:
-                channel = await interaction.client.fetch_channel(target_channel_id)
-            except Exception:
-                await interaction.followup.send("Error: Could not find the target channel.")
-                return
-        embed = discord.Embed(title="✨ New Website Recommendation", color=0xE85D9E, timestamp=discord.utils.utcnow())
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        embed.add_field(name="🏷️ Suggestion", value=self.rec_title.value, inline=False)
-        embed.add_field(name="📝 Details", value=self.description.value, inline=False)
-        files = []
-        if self.attachment:
-            file_data = await self.attachment.to_file()
-            files.append(file_data)
-            if self.attachment.content_type and self.attachment.content_type.startswith('image/'):
-                embed.set_image(url=f"attachment://{self.attachment.filename}")
-        try:
-            await channel.send(embed=embed, files=files)
-            await interaction.followup.send("✅ Your recommendation has been submitted successfully!")
-        except discord.Forbidden:
-            await interaction.followup.send(f"❌ Error: I don't have access to the recommendation channel. Please ensure I have 'View Channel' and 'Send Messages' permissions in <#{target_channel_id}>.")
-        except discord.HTTPException as e:
-            logger.error(f"Failed to send recommendation: {e}")
-            await interaction.followup.send("❌ Something went wrong while submitting the recommendation.")
-
-
 bot = RimeraBot()
 
 
@@ -386,7 +403,6 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Apple Music", value=config.get('apple_music_url') or "Not set", inline=False)
     embed.add_field(name="SoundCloud", value=config.get('soundcloud_url') or "Not set", inline=False)
     embed.add_field(name="YouTube", value=config.get('youtube_url') or config.get('youtube_channel_id') or "Not set", inline=False)
-    embed.add_field(name="Tumblr", value=config.get('tumblr_url') or "Not set", inline=False)
     media_channel = config.get('media_download_channel_id')
     embed.add_field(name="Media downloader", value=f"<#{media_channel}>" if media_channel else "Not set", inline=False)
     embed.add_field(name="Polling", value=f"{config.get('polling_interval_minutes', 5)} minutes", inline=True)
@@ -411,108 +427,6 @@ async def donate(interaction: discord.Interaction):
 async def channels(interaction: discord.Interaction):
     embed = discord.Embed(title="Configured update channels", description=bot.configured_channel_mentions(), color=0xE85D9E)
     await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="web-reccomendations", description="Submit a recommendation for the website")
-async def web_reccomendations(interaction: discord.Interaction, file: discord.Attachment = None):
-    await interaction.response.send_modal(WebRecommendationModal(file))
-
-
-@bot.tree.command(name="test", description="Test shop or social pings with the most recent post info")
-@app_commands.choices(ping_type=[app_commands.Choice(name="Shop Ping", value="shop"), app_commands.Choice(name="Social Ping", value="social")])
-@is_admin_or_super_user()
-async def test_ping(interaction: discord.Interaction, ping_type: app_commands.Choice[str]):
-    await interaction.response.defer(thinking=True)
-    if ping_type.value == "shop":
-        items = await asyncio.to_thread(bot.website_scraper.get_latest_products)
-        if items:
-            item = items[0]
-            embed = bot.formatter.format_item(item)
-            stock_status = "❌ Sold Out" if item.get('sold_out') else "✅ In Stock"
-            embed.add_field(name="📊 Item Stats", value=f"**Price:** {item.get('price', 'N/A')}\n**Status:** {stock_status}", inline=False)
-            await interaction.followup.send(embed=embed)
-        else:
-            await interaction.followup.send("No shop products found.")
-    else:
-        fetchers = [bot.social_scraper.get_instagram_updates, bot.social_scraper.get_youtube_updates, bot.social_scraper.get_spotify_updates, bot.social_scraper.get_apple_music_updates, bot.social_scraper.get_soundcloud_updates, bot.social_scraper.get_tumblr_updates]
-        found_item = None
-        for fetcher in fetchers:
-            items = await asyncio.to_thread(fetcher)
-            if items:
-                found_item = items[0]
-                break
-        if found_item:
-            embed = bot.formatter.format_item(found_item)
-            embed.add_field(name="📊 Post Info", value=f"**Platform:** {found_item.get('source', 'Unknown')}\n**Post ID:** `{found_item.get('id', 'N/A')}`", inline=False)
-            await interaction.followup.send(embed=embed)
-        else:
-            await interaction.followup.send("No social items found.")
-
-
-@bot.tree.command(name="set-channel", description="Set the default update channel")
-@is_admin_or_super_user()
-async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'default', channel)
-
-
-@bot.tree.command(name="set-website-channel", description="Set the product and restock update channel")
-@is_admin_or_super_user()
-async def set_website_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'website', channel)
-
-
-@bot.tree.command(name="set-shop-channel", description="Set the shop product and restock update channel")
-@is_admin_or_super_user()
-async def set_shop_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'website', channel)
-
-
-@bot.tree.command(name="set-twitter-channel", description="Set the Twitter update channel")
-@is_admin_or_super_user()
-async def set_twitter_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'twitter', channel)
-
-
-@bot.tree.command(name="set-tiktok-channel", description="Set the TikTok update channel")
-@is_admin_or_super_user()
-async def set_tiktok_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'tiktok', channel)
-
-
-@bot.tree.command(name="set-instagram-channel", description="Set the Instagram update channel")
-@is_admin_or_super_user()
-async def set_instagram_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'instagram', channel)
-
-
-@bot.tree.command(name="set-spotify-channel", description="Set the Spotify update channel")
-@is_admin_or_super_user()
-async def set_spotify_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'spotify', channel)
-
-
-@bot.tree.command(name="set-apple-music-channel", description="Set the Apple Music update channel")
-@is_admin_or_super_user()
-async def set_apple_music_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'apple_music', channel)
-
-
-@bot.tree.command(name="set-soundcloud-channel", description="Set the SoundCloud update channel")
-@is_admin_or_super_user()
-async def set_soundcloud_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'soundcloud', channel)
-
-
-@bot.tree.command(name="set-youtube-channel", description="Set the YouTube channel")
-@is_admin_or_super_user()
-async def set_youtube_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'youtube', channel)
-
-
-@bot.tree.command(name="set-tumblr-channel", description="Set the Tumblr update channel")
-@is_admin_or_super_user()
-async def set_tumblr_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await set_source_channel(interaction, 'tumblr', channel)
 
 
 @bot.tree.command(name="set-media-channel", description="Set the channel where social links are automatically downloaded")
@@ -546,46 +460,6 @@ async def initial(interaction: discord.Interaction, password: str):
     else:
         message = "You are already registered for private early shop alerts."
     await interaction.response.send_message(message, ephemeral=True)
-
-
-@bot.tree.command(name="check-products", description="Check rimerarimera.com now for new or restocked products")
-@is_admin_or_super_user()
-async def check_products(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-    products = await asyncio.to_thread(bot.website_scraper.get_latest_products)
-    updates = bot.state_manager.get_product_updates(products)
-    if not products:
-        await interaction.followup.send("No products found on the website. The shop might be locked or down.")
-        return
-    sent_count = 0
-    for product in updates:
-        sent_count += await bot.send_early_shop_update(product)
-        await bot.send_item_update('website', product)
-    await interaction.followup.send(f"Checked {len(products)} products. Sent {sent_count} early alert(s) and posted updates to the shop channel.")
-
-
-@bot.tree.command(name="check-socials", description="Check Linktree-listed social and music pages now")
-@is_admin_or_super_user()
-async def check_socials(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-    source_checks = [
-        ('instagram', 'Instagram', bot.social_scraper.get_instagram_updates),
-        ('spotify', 'Spotify', bot.social_scraper.get_spotify_updates),
-        ('apple_music', 'Apple Music', bot.social_scraper.get_apple_music_updates),
-        ('soundcloud', 'SoundCloud', bot.social_scraper.get_soundcloud_updates),
-        ('youtube', 'YouTube', bot.social_scraper.get_youtube_updates),
-        ('tumblr', 'Tumblr', bot.social_scraper.get_tumblr_updates),
-    ]
-    checked_count = 0
-    sent_count = 0
-    for source_key, source_name, fetcher in source_checks:
-        items = await asyncio.to_thread(fetcher)
-        checked_count += len(items)
-        new_items = bot.state_manager.get_new_items(source_name, items)
-        for item in new_items:
-            if await bot.send_item_update(source_key, item):
-                sent_count += 1
-    await interaction.followup.send(f"Checked {checked_count} social item(s). Sent {sent_count} update(s).")
 
 
 @bot.tree.error
