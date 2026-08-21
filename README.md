@@ -1,18 +1,17 @@
 # Real Rimera Hater Radio Bot
 
-A Discord bot that watches Rimera-related shops and socials, then posts clean Discord embeds when it finds new updates. It can also turn public social-media links dropped into a configured Discord channel into downloadable video/photo attachments.
+A Discord bot that watches Rimera-related shops and socials, then posts Discord embeds when it finds new updates. It can also turn public social-media links dropped into a configured Discord channel into downloadable video/photo attachments.
 
 ## What It Does
 
 - Checks `rimerarimera.com` for new products and restocks.
 - Posts product embeds with the product name, description, photo, price, stock status, and variant availability.
-- Tracks Rimera social/music links from the Linktree source of truth.
+- Tracks configured social/music sources.
 - Automatically downloads public media links with `yt-dlp` in a selected Discord channel and replies to the original message with the downloaded media.
-- Instagram carousel posts and other multi-media Instagram URLs are downloaded as multiple media items where yt-dlp can access them.
-- Instagram Story URLs are handled with an anonymous-first fallback chain.
-- Sends a multi-media result in one Discord reply when Discord's attachment limit allows it; excess items use the bot's private fallback rather than being zipped.
+- Handles Instagram posts, reels, Stories, photos, videos, and multi-media posts with dedicated fallbacks.
+- Sends a multi-media result in one Discord reply when Discord allows it; excess items use a private fallback and are never zipped.
 - Keeps a local `cache.json` so old posts/products are not repeatedly announced.
-- Requires the Discord token to be stored in `.env`, not `config.json`.
+- Keeps secrets in `.env` and local cookie files rather than committing them.
 
 ## Python Version
 
@@ -35,13 +34,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-3. Create `.env` and add your Discord token:
+3. Create `.env`:
 
 ```env
 DISCORD_TOKEN=your_actual_discord_bot_token_here
+WEBSHARE_PROXY_USERNAME=
+WEBSHARE_PROXY_PASSWORD=
+WEBSHARE_PROXY_HOSTS=
+YT_DLP_COOKIES_FILE=/absolute/path/to/instagram-cookies.txt
 ```
 
-Do not commit `.env`.
+The proxy variables and cookies path are optional. Never commit `.env` or an Instagram cookies file.
 
 ## Termux
 
@@ -52,19 +55,21 @@ pkg update && pkg upgrade
 pkg install python git ffmpeg curl
 ```
 
-Then use the repo's Termux startup/update scripts as described below.
+For a new Termux checkout, use `termux-start.sh` after creating `.env`.
+
+```bash
+bash termux-start.sh
+```
 
 ## Updating The Bot
 
-For an existing Termux installation, **do not run `git pull` first**. The updater is designed to handle local changes without overwriting your local runtime configuration.
-
-Use:
+For an existing Termux installation, **do not run `git pull` first**. The updater is designed to recover from local changes safely.
 
 ```bash
 cd ~/REAL-RIMERA-HATER-RADIO && curl -fsSL https://raw.githubusercontent.com/therealmangoosey/REAL-RIMERA-HATER-RADIO/main/update-termux.sh | bash
 ```
 
-The updater backs up `.env`, `config.json`, `cache.json`, and `instagram-cookies.txt`, stashes other local changes, fetches the latest `main`, resets the code to that version, restores local runtime files, updates dependencies, compile-checks the bot, and starts it again.
+The updater backs up `.env`, `config.json`, `cache.json`, and `instagram-cookies.txt`, stashes other local changes, fetches the latest `main`, resets the code, restores runtime files, updates dependencies, compiles the Python files, runs the unit tests, and only starts the bot when those checks pass.
 
 ## Media Downloader
 
@@ -74,47 +79,41 @@ An administrator enables the downloader with:
 /set-media-channel channel:#downloads
 ```
 
-After that, a message such as:
+After that, a message containing a public media URL can be dropped into the configured channel. The bot downloads it and replies directly to the original message.
 
-```text
-https://www.instagram.com/p/example/
-```
+The downloader uses the best available video/audio formats it can access and FFmpeg when available. It does not create ZIP files.
 
-or an Instagram Story URL can be dropped into the configured channel. The bot downloads the media and replies to that message.
+### Instagram
 
-The downloader uses the best available video/audio formats it can access and FFmpeg when available. It does not create ZIP files. Multiple media items from a single Instagram post are sent together in one reply when possible. Discord's attachment limit is handled with the bot's private fallback.
+Instagram handling is split by media type because yt-dlp currently has known failures on image-only posts and image-only carousels, where it can report `No video formats found`. The bot therefore treats yt-dlp as the video-first path and uses separate public fallbacks for photos and Stories.
 
-### Instagram Story fallback chain
+Current order:
 
-For Instagram Stories the bot tries, in order:
+1. yt-dlp anonymous attempt.
+2. For Instagram Stories: multiple public Story viewer/downloader services.
+3. For Instagram posts/reels: multiple public post/photo downloader services plus a direct public-page attempt.
+4. Optional authenticated Instagram cookies as a final fallback.
 
-1. **yt-dlp anonymously** — no cookies are used.
-2. **Free public web fallbacks** — the bot tries Download IG Story and StoriesDown for public Stories without an API key or Instagram login.
-3. **Optional authenticated cookies** — only when `instagram-cookies.txt` or `YT_DLP_COOKIES_FILE` is configured.
-4. A clear failure is reported if none of the above can access the Story.
+The fallback code only accepts actual image/video responses or explicit media/download links. Website logos, screenshots, icons, HTML pages, and download buttons are rejected.
 
-The third-party fallback is intentionally a web scraper rather than an API integration, so no API key is required. The services advertise free anonymous access to public Stories and current Story feeds. citeturn756595search1turn864925search1
-
-These third-party sites can change their HTML or stop working, so they are treated as fallbacks rather than the primary downloader. They only work for content the service can access publicly; private Stories still require an authorized account. citeturn864925search4turn864925search9
+Public third-party sites can change without notice. They only work for media the site can access publicly. Private/login-only/expired/DRM-protected content can still fail.
 
 ### Optional Instagram cookies
 
-Cookies are no longer required for the first attempt. They are only a last-resort fallback for Stories that Instagram refuses to expose anonymously.
-
-If you choose to use them, put a Mozilla/Netscape cookies.txt export here on Termux:
+Cookies are never used on the first attempt. They are only a final fallback.
 
 ```bash
 cd ~/REAL-RIMERA-HATER-RADIO
 nano instagram-cookies.txt
 ```
 
-Or set:
+Or configure:
 
 ```env
 YT_DLP_COOKIES_FILE=/data/data/com.termux/files/home/REAL-RIMERA-HATER-RADIO/instagram-cookies.txt
 ```
 
-Never commit or share the cookies file.
+Use Netscape/Mozilla cookies.txt format and never share the file.
 
 ## Slash Commands
 
@@ -125,19 +124,33 @@ Never commit or share the cookies file.
 - `/check-products` — manually check the shop.
 - `/check-socials` — manually check social/music sources.
 - `/initial` — register for private early shop alerts.
-- `/set-channel` and the source-specific `/set-*-channel` commands configure update channels.
+- `/set-channel` plus the source-specific `/set-*-channel` commands configure update channels.
 
-## Running
+## Initial Alert Password
 
-```bash
-python bot.py
+Fresh copies use:
+
+```text
+CHANGE_ME
 ```
 
-For Termux, use the included startup script so the environment and dependencies are prepared automatically.
+Change `initial_password` in your local `config.json` before using `/initial`. The Termux updater preserves your local `config.json`, so it will not overwrite that value.
+
+## Testing
+
+Run:
+
+```bash
+python -m compileall -q bot.py media_downloader.py instagram_fallback.py discord_formatter.py state_manager.py scrapers
+python -m unittest discover -v
+```
+
+GitHub Actions now runs the same compile and unit-test checks on pushes and pull requests.
 
 ## Notes
 
 - Enable Discord's **Message Content Intent** because the media downloader watches normal messages for URLs.
-- TikTok browser-dependent checking is optional on Termux; the main media downloader does not require Selenium.
+- TikTok profile monitoring uses an HTTP-first scraper; its Selenium fallback is optional and is not required by the media downloader.
 - FFmpeg is strongly recommended for high-quality video merging and Discord-size handling.
-- Private/login-only/expired/DRM-protected media can still fail.
+- The bot limits concurrent media jobs so a burst of links does not overwhelm a small Termux device.
+- Discord attachment limits still apply. The bot keeps the first batch together and sends overflow privately rather than creating a ZIP.
