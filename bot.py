@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from discord_formatter import DiscordFormatter
+from media_downloader import MediaDownloader, MediaDownloadError
 from scrapers.social_scraper import SocialScraper
 from scrapers.tiktok_scraper import TikTokScraper
 from scrapers.twitter_scraper import TwitterScraper
@@ -20,31 +21,21 @@ try:
 except ImportError:
     start_web_server = None
 
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s:%(levelname)s:%(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
 )
 logger = logging.getLogger('rimera-bot')
 
 CONFIG_FILE = 'config.json'
 SOURCE_LABELS = {
-    'default': 'Default',
-    'website': 'Website',
-    'twitter': 'Twitter',
-    'tiktok': 'TikTok',
-    'instagram': 'Instagram',
-    'spotify': 'Spotify',
-    'apple_music': 'Apple Music',
-    'soundcloud': 'SoundCloud',
-    'youtube': 'YouTube',
+    'default': 'Default', 'website': 'Website', 'twitter': 'Twitter',
+    'tiktok': 'TikTok', 'instagram': 'Instagram', 'spotify': 'Spotify',
+    'apple_music': 'Apple Music', 'soundcloud': 'SoundCloud', 'youtube': 'YouTube',
 }
-
 SUPER_ADMIN_ID = 1300260018691637308
+
 
 def is_admin_or_super_user():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -53,16 +44,17 @@ def is_admin_or_super_user():
         return interaction.user.guild_permissions.administrator
     return app_commands.check(predicate)
 
+
 SHOP_PUBLIC_DELAY_SECONDS = 120
 
 
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
         loaded_config = json.load(f)
-
     loaded_config.setdefault('channels', {})
     if loaded_config.get('channel_id') and not loaded_config['channels'].get('default'):
         loaded_config['channels']['default'] = loaded_config['channel_id']
+    loaded_config.setdefault('media_download_channel_id', None)
     loaded_config.setdefault('website_url', 'https://rimerarimera.com')
     loaded_config.setdefault('linktree_url', 'https://linktr.ee/rimerarimera')
     loaded_config.setdefault('instagram_url', 'https://instagram.com/rimeraera?igshid=YTM0ZjI4ZDI=')
@@ -82,7 +74,6 @@ def save_config():
 
 
 config = load_config()
-
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
@@ -92,7 +83,6 @@ class RimeraBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
-
         self.state_manager = StateManager()
         self.twitter_scraper = TwitterScraper(
             config.get('twitter_handle', 'rimera'),
@@ -102,11 +92,12 @@ class RimeraBot(commands.Bot):
         self.website_scraper = WebsiteScraper(config.get('website_url', 'https://rimerarimera.com'))
         self.social_scraper = SocialScraper(config)
         self.formatter = DiscordFormatter()
+        self.media_downloader = MediaDownloader()
+        self.media_download_semaphore = asyncio.Semaphore(2)
 
     async def setup_hook(self):
         logger.info("Setting up bot...")
         self.polling_loop.start()
-
         if start_web_server and config.get('enable_web_server', False):
             start_web_server(self, config.get('flask_port', 5000))
 
@@ -118,6 +109,51 @@ class RimeraBot(commands.Bot):
             logger.info(f"Synced {len(synced)} command(s)")
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}")
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        channel_id = config.get('media_download_channel_id')
+        if not channel_id or message.channel.id != int(channel_id):
+            return
+        urls = list(dict.fromkeys(self.media_downloader.extract_urls(message.content)))[:3]
+        if not urls:
+            return
+        async with self.media_download_semaphore:
+            await self.download_media_reply(message, urls)
+
+    async def download_media_reply(self, message, urls):
+        files = []
+        workdirs = []
+        failed = []
+        try:
+            for url in urls:
+                try:
+                    workdir, downloaded, _ = await asyncio.to_thread(self.media_downloader.download, url)
+                    workdirs.append(workdir)
+                    for path in downloaded[:10 - len(files)]:
+                        fitted = await asyncio.to_thread(self.media_downloader.fit_for_discord, path)
+                        if fitted:
+                            files.append(discord.File(fitted, filename=os.path.basename(fitted)))
+                        else:
+                            failed.append(url)
+                except MediaDownloadError as exc:
+                    logger.warning(f"Could not download {url}: {exc}")
+                    failed.append(url)
+                except Exception as exc:
+                    logger.exception(f"Unexpected media download error for {url}: {exc}")
+                    failed.append(url)
+            if files:
+                text = "Some links could not be downloaded, but I got the rest." if failed else None
+                await message.reply(content=text, files=files, mention_author=False)
+            elif failed:
+                await message.reply(
+                    "I couldn't download that link. It may be private, unsupported, unavailable, or too large for Discord.",
+                    mention_author=False,
+                )
+        finally:
+            for workdir in workdirs:
+                self.media_downloader.cleanup(workdir)
 
     def channel_id_for(self, source_key):
         channels = config.setdefault('channels', {})
@@ -133,7 +169,6 @@ class RimeraBot(commands.Bot):
                     channel = self.get_channel(int(channel_id))
                 except (ValueError, TypeError):
                     pass
-            
             value = channel.mention if channel else (f"`{channel_id}`" if channel_id else "Not set")
             rows.append(f"{label}: {value}")
         return "\n".join(rows)
@@ -143,22 +178,15 @@ class RimeraBot(commands.Bot):
         if not channel_id:
             logger.warning(f"No channel configured for {source_key}; skipping notification.")
             return False
-
-        channel = None
         try:
-            channel_id_int = int(channel_id)
-            channel = self.get_channel(channel_id_int) or await self.fetch_channel(channel_id_int)
+            channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
         except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
             logger.error(f"Error retrieving channel {channel_id} for {source_key}: {e}")
             return False
-
         if not channel:
-            logger.error(f"Could not find channel with ID {channel_id} for {source_key}")
             return False
-
         try:
-            embed = self.formatter.format_item(item)
-            await channel.send(embed=embed)
+            await channel.send(embed=self.formatter.format_item(item))
             return True
         except discord.DiscordException as e:
             logger.error(f"Could not send {source_key} update to channel {channel_id}: {e}")
@@ -169,7 +197,6 @@ class RimeraBot(commands.Bot):
         if not subscriber_ids:
             logger.info("No /initial subscribers configured for early shop update.")
             return 0
-
         sent_count = 0
         embed = self.formatter.format_item(item)
         for user_id in subscriber_ids:
@@ -179,7 +206,6 @@ class RimeraBot(commands.Bot):
                 sent_count += 1
             except discord.DiscordException as e:
                 logger.error(f"Could not send early shop update to user {user_id}: {e}")
-
         return sent_count
 
     async def send_delayed_shop_channel_update(self, item):
@@ -194,7 +220,6 @@ class RimeraBot(commands.Bot):
     @tasks.loop(minutes=config.get('polling_interval_minutes', 5))
     async def polling_loop(self):
         logger.info("Starting polling cycle...")
-
         await self.poll_twitter()
         await self.poll_tiktok()
         await self.poll_website()
@@ -239,7 +264,6 @@ class RimeraBot(commands.Bot):
             ('soundcloud', 'SoundCloud', self.social_scraper.get_soundcloud_updates),
             ('youtube', 'YouTube', self.social_scraper.get_youtube_updates),
         ]
-
         for source_key, source_name, fetcher in source_checks:
             try:
                 first_run = self.state_manager.is_first_run(source_name)
@@ -265,7 +289,7 @@ class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
         self.attachment = attachment
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # Fixes the "Interaction failed" error
+        await interaction.response.defer()
         target_channel_id = 1507095977251700796
         channel = interaction.client.get_channel(target_channel_id)
         if not channel:
@@ -274,28 +298,20 @@ class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
             except Exception:
                 await interaction.followup.send("Error: Could not find the target channel.")
                 return
-
-        embed = discord.Embed(
-            title="✨ New Website Recommendation",
-            color=0xE85D9E,
-            timestamp=discord.utils.utcnow()
-        )
+        embed = discord.Embed(title="✨ New Website Recommendation", color=0xE85D9E, timestamp=discord.utils.utcnow())
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         embed.add_field(name="🏷️ Suggestion", value=self.rec_title.value, inline=False)
         embed.add_field(name="📝 Details", value=self.description.value, inline=False)
-        
         files = []
         if self.attachment:
             file_data = await self.attachment.to_file()
             files.append(file_data)
             if self.attachment.content_type and self.attachment.content_type.startswith('image/'):
                 embed.set_image(url=f"attachment://{self.attachment.filename}")
-
         try:
             await channel.send(embed=embed, files=files)
             await interaction.followup.send("✅ Your recommendation has been submitted successfully!")
         except discord.Forbidden:
-            logger.error(f"Permission denied (50001) for channel {target_channel_id}. Bot lacks 'View Channel' or 'Send Messages'.")
             await interaction.followup.send(f"❌ Error: I don't have access to the recommendation channel. Please ensure I have 'View Channel' and 'Send Messages' permissions in <#{target_channel_id}>.")
         except discord.HTTPException as e:
             logger.error(f"Failed to send recommendation: {e}")
@@ -310,18 +326,12 @@ async def set_source_channel(interaction, source_key, channel):
     if source_key == 'default':
         config['channel_id'] = channel.id
     save_config()
-    await interaction.response.send_message(
-        f"{SOURCE_LABELS[source_key]} updates will post in {channel.mention}."
-    )
+    await interaction.response.send_message(f"{SOURCE_LABELS[source_key]} updates will post in {channel.mention}.")
 
 
 @bot.tree.command(name="status", description="Check the bot status and configured channels")
 async def status(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Rimera Bot status",
-        description="Running and watching rimerarimera.com plus configured social sources.",
-        color=0xE85D9E
-    )
+    embed = discord.Embed(title="Rimera Bot status", description="Running and watching rimerarimera.com plus configured social sources.", color=0xE85D9E)
     embed.add_field(name="Website", value=bot.website_scraper.url, inline=False)
     embed.add_field(name="Twitter", value=f"@{bot.twitter_scraper.handle}", inline=True)
     embed.add_field(name="TikTok", value=f"@{bot.tiktok_scraper.handle}", inline=True)
@@ -331,6 +341,8 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Apple Music", value=config.get('apple_music_url') or "Not set", inline=False)
     embed.add_field(name="SoundCloud", value=config.get('soundcloud_url') or "Not set", inline=False)
     embed.add_field(name="YouTube", value=config.get('youtube_url') or config.get('youtube_channel_id') or "Not set", inline=False)
+    media_channel = config.get('media_download_channel_id')
+    embed.add_field(name="Media downloader", value=f"<#{media_channel}>" if media_channel else "Not set", inline=False)
     embed.add_field(name="Polling", value=f"{config.get('polling_interval_minutes', 5)} minutes", inline=True)
     embed.add_field(name="Early shop alerts", value=f"{len(config.get('initial_subscribers', []))} subscriber(s)", inline=True)
     embed.add_field(name="Channels", value=bot.configured_channel_mentions(), inline=False)
@@ -346,18 +358,12 @@ async def invite(interaction: discord.Interaction):
 
 @bot.tree.command(name="donate", description="Support the bot's hosting and development")
 async def donate(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "Donations are only used to help run and maintain the bot via PayPal: https://bit.ly/49figis",
-    )
+    await interaction.response.send_message("Donations are only used to help run and maintain the bot via PayPal: https://bit.ly/49figis")
 
 
 @bot.tree.command(name="channels", description="Show where each update type is posted")
 async def channels(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Configured update channels",
-        description=bot.configured_channel_mentions(),
-        color=0xE85D9E
-    )
+    embed = discord.Embed(title="Configured update channels", description=bot.configured_channel_mentions(), color=0xE85D9E)
     await interaction.response.send_message(embed=embed)
 
 
@@ -367,14 +373,10 @@ async def web_reccomendations(interaction: discord.Interaction, file: discord.At
 
 
 @bot.tree.command(name="test", description="Test shop or social pings with the most recent post info")
-@app_commands.choices(ping_type=[
-    app_commands.Choice(name="Shop Ping", value="shop"),
-    app_commands.Choice(name="Social Ping", value="social"),
-])
+@app_commands.choices(ping_type=[app_commands.Choice(name="Shop Ping", value="shop"), app_commands.Choice(name="Social Ping", value="social")])
 @is_admin_or_super_user()
 async def test_ping(interaction: discord.Interaction, ping_type: app_commands.Choice[str]):
     await interaction.response.defer(thinking=True)
-    
     if ping_type.value == "shop":
         items = await asyncio.to_thread(bot.website_scraper.get_latest_products)
         if items:
@@ -386,20 +388,13 @@ async def test_ping(interaction: discord.Interaction, ping_type: app_commands.Ch
         else:
             await interaction.followup.send("No shop products found.")
     else:
-        fetchers = [
-            bot.social_scraper.get_instagram_updates,
-            bot.social_scraper.get_youtube_updates,
-            bot.social_scraper.get_spotify_updates,
-            bot.social_scraper.get_apple_music_updates,
-            bot.social_scraper.get_soundcloud_updates
-        ]
+        fetchers = [bot.social_scraper.get_instagram_updates, bot.social_scraper.get_youtube_updates, bot.social_scraper.get_spotify_updates, bot.social_scraper.get_apple_music_updates, bot.social_scraper.get_soundcloud_updates]
         found_item = None
         for fetcher in fetchers:
             items = await asyncio.to_thread(fetcher)
             if items:
                 found_item = items[0]
                 break
-        
         if found_item:
             embed = bot.formatter.format_item(found_item)
             embed.add_field(name="📊 Post Info", value=f"**Platform:** {found_item.get('source', 'Unknown')}\n**Post ID:** `{found_item.get('id', 'N/A')}`", inline=False)
@@ -462,10 +457,27 @@ async def set_soundcloud_channel(interaction: discord.Interaction, channel: disc
     await set_source_channel(interaction, 'soundcloud', channel)
 
 
-@bot.tree.command(name="set-youtube-channel", description="Set the YouTube update channel")
+@bot.tree.command(name="set-youtube-channel", description="Set the YouTube channel")
 @is_admin_or_super_user()
 async def set_youtube_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     await set_source_channel(interaction, 'youtube', channel)
+
+
+@bot.tree.command(name="set-media-channel", description="Set the channel where social links are automatically downloaded")
+@is_admin_or_super_user()
+async def set_media_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    config['media_download_channel_id'] = channel.id
+    save_config()
+    await interaction.response.send_message(f"Media auto-downloads are now enabled in {channel.mention}. Drop a public video/photo link there and I'll reply with the downloaded media.")
+
+
+@bot.tree.command(name="media-channel", description="Show the channel used for automatic media downloads")
+async def media_channel(interaction: discord.Interaction):
+    channel_id = config.get('media_download_channel_id')
+    if channel_id:
+        await interaction.response.send_message(f"Automatic media downloads are enabled in <#{channel_id}>.")
+    else:
+        await interaction.response.send_message("Automatic media downloads are not configured yet. An administrator can use `/set-media-channel`.")
 
 
 @bot.tree.command(name="initial", description="Register for private early shop alerts")
@@ -473,7 +485,6 @@ async def initial(interaction: discord.Interaction, password: str):
     if password != config.get('initial_password', 'Phone118'):
         await interaction.response.send_message("Incorrect password.", ephemeral=True)
         return
-
     subscriber_id = str(interaction.user.id)
     subscribers = config.setdefault('initial_subscribers', [])
     if subscriber_id not in subscribers:
@@ -482,7 +493,6 @@ async def initial(interaction: discord.Interaction, password: str):
         message = "You are registered for private early shop alerts."
     else:
         message = "You are already registered for private early shop alerts."
-
     await interaction.response.send_message(message, ephemeral=True)
 
 
@@ -492,27 +502,20 @@ async def check_products(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     products = await asyncio.to_thread(bot.website_scraper.get_latest_products)
     updates = bot.state_manager.get_product_updates(products)
-
     if not products:
         await interaction.followup.send("No products found on the website. The shop might be locked or down.")
         return
-
     sent_count = 0
     for product in updates:
         sent_count += await bot.send_early_shop_update(product)
-        # Post immediately for manual checks to verify channel config
         await bot.send_item_update('website', product)
-
-    await interaction.followup.send(
-        f"Checked {len(products)} products. Sent {sent_count} early alert(s) and posted updates to the shop channel."
-    )
+    await interaction.followup.send(f"Checked {len(products)} products. Sent {sent_count} early alert(s) and posted updates to the shop channel.")
 
 
 @bot.tree.command(name="check-socials", description="Check Linktree-listed social and music pages now")
 @is_admin_or_super_user()
 async def check_socials(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
-
     source_checks = [
         ('instagram', 'Instagram', bot.social_scraper.get_instagram_updates),
         ('spotify', 'Spotify', bot.social_scraper.get_spotify_updates),
@@ -522,7 +525,6 @@ async def check_socials(interaction: discord.Interaction):
     ]
     checked_count = 0
     sent_count = 0
-
     for source_key, source_name, fetcher in source_checks:
         items = await asyncio.to_thread(fetcher)
         checked_count += len(items)
@@ -530,10 +532,7 @@ async def check_socials(interaction: discord.Interaction):
         for item in new_items:
             if await bot.send_item_update(source_key, item):
                 sent_count += 1
-
-    await interaction.followup.send(
-        f"Checked {checked_count} social item(s). Sent {sent_count} update(s)."
-    )
+    await interaction.followup.send(f"Checked {checked_count} social item(s). Sent {sent_count} update(s).")
 
 
 @bot.tree.error
@@ -543,7 +542,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     else:
         logger.error(f"Slash command error: {error}")
         message = "Something went wrong while running that command."
-
     if interaction.response.is_done():
         await interaction.followup.send(message)
     else:
