@@ -7,7 +7,7 @@ from scrapers.twitter_scraper import TwitterScraper
 from scrapers.social_scraper import SocialScraper
 from scrapers.website_scraper import WebsiteScraper
 from state_manager import StateManager
-# TikTok requires Selenium/Chrome, so we'll skip it in basic CI-like tests but can test manually
+
 
 class TestScrapers(unittest.TestCase):
     def test_twitter_init(self):
@@ -18,8 +18,9 @@ class TestScrapers(unittest.TestCase):
         scraper = WebsiteScraper()
         self.assertEqual(scraper.url, "https://rimerarimera.com")
 
-    @patch('scrapers.website_scraper.requests.get')
-    def test_website_shopify_products_include_stock_status(self, mock_get):
+    @patch.object(WebsiteScraper, "_get_products_from_storefront_api", return_value=[])
+    @patch("scrapers.website_scraper.requests.Session.get")
+    def test_website_shopify_products_include_stock_status(self, mock_get, _mock_storefront):
         response = Mock()
         response.status_code = 200
         response.json.return_value = {
@@ -111,6 +112,7 @@ class TestScrapers(unittest.TestCase):
 
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0]["event_type"], "restocked")
+
 
 if __name__ == '__main__':
     unittest.main()
