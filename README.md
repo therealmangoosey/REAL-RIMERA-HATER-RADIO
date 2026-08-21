@@ -17,6 +17,8 @@ A Discord bot that watches Rimera-related shops and socials, then posts clean Di
 - Lets server admins choose separate Discord channels for each update type.
 - Lets approved users register for private early shop alerts before the public shop channel post.
 - Automatically downloads public media links with `yt-dlp` in a selected Discord channel and replies to the original message with the downloaded video/photo.
+- Supports multi-media Instagram posts/carousels and Instagram Story URLs when yt-dlp can access the media.
+- Sends all successfully downloaded pieces from one post/story into the same Discord reply. If there are more than Discord's attachment limit, it creates one ZIP fallback so the complete set still stays in one message when the ZIP fits Discord's upload limit.
 - Keeps a local `cache.json` so old posts/products are not repeatedly announced.
 - Requires the Discord token to be stored in `.env`, not `config.json`.
 
@@ -64,9 +66,9 @@ Do not commit `.env`. It is ignored by `.gitignore`.
 
 ## Media Downloader Requirements
 
-The automatic media downloader uses `yt-dlp`, which supports a very large number of video and social-media sites. Instagram and TikTok are supported when the public post is accessible, but private/login-only posts can still fail. Supported sites can change as platforms change their websites.
+The automatic media downloader uses `yt-dlp`, which supports a very large number of video and social-media sites. Instagram and TikTok are supported when the post/story is accessible to the downloader. Private, login-only, expired, DRM-protected, or currently unsupported media can still fail.
 
-`ffmpeg` is strongly recommended. It lets the bot merge separate high-quality video/audio streams and compress files that are too large for Discord's current free upload limit.
+`ffmpeg` is strongly recommended. It lets the bot merge separate high-quality video/audio streams and compress files that are too large for Discord's current upload limit.
 
 On Windows, install FFmpeg and make sure `ffmpeg` is available in PATH. On Debian/Ubuntu:
 
@@ -74,6 +76,16 @@ On Windows, install FFmpeg and make sure `ffmpeg` is available in PATH. On Debia
 sudo apt update
 sudo apt install ffmpeg
 ```
+
+### Instagram Story access
+
+Instagram Stories are often login-gated. To let the bot use an authorized Instagram session, set an optional yt-dlp cookies file in `.env`:
+
+```env
+YT_DLP_COOKIES_FILE=/absolute/path/to/instagram-cookies.txt
+```
+
+The cookies file must belong to an account that is authorized to view the requested Story. Do not commit that file or publish it.
 
 ## Discord Bot Permissions
 
@@ -196,22 +208,33 @@ After that, any normal message in that channel containing a public video/photo U
 Example:
 
 ```text
-https://www.tiktok.com/@example/video/123456789
+https://www.instagram.com/p/example/
 ```
 
-The bot downloads the best available media it can access and replies directly to that message with the attachment.
+or:
 
-It can process up to 3 links from one message and up to 10 attachments from a download result.
+```text
+https://www.instagram.com/stories/example/123456789/
+```
 
-Use `/media-channel` to see the current channel.
+The bot downloads the best available media it can access and replies directly to that message.
+
+### Instagram posts, carousels and Stories
+
+Instagram links are handled as multi-item downloads. For a carousel, the downloader attempts to retrieve every photo/video item rather than only the first one. Story URLs are also passed through the same multi-item handling.
+
+All successfully downloaded pieces from one source are sent in **one Discord reply**. Discord has a per-message attachment limit, so when a source produces more direct attachments than Discord permits, the bot creates a single ZIP fallback to keep the complete result in the same message where possible.
+
+For Stories that require login, configure `YT_DLP_COOKIES_FILE` as described above. The bot cannot bypass Instagram privacy controls; the cookies must already have permission to view the Story.
 
 ### Quality and speed
 
 - Video uses the best available video + audio formats and merges them when FFmpeg is available.
+- Instagram carousel/story extraction is enabled without expanding ordinary YouTube or other links into unrelated playlists.
 - The downloader uses a small retry count and concurrent fragment downloads for quicker downloads without blocking the Discord event loop.
 - Downloads run in worker threads and are limited to two concurrent download jobs so a burst of links does not overwhelm the bot host.
-- If a file is larger than Discord's upload limit, the bot attempts an FFmpeg compression pass before giving up.
-- Private, login-only, expired, DRM-protected, or currently unsupported posts may still fail.
+- If an individual file is larger than Discord's upload limit, the bot attempts an FFmpeg compression pass before giving up.
+- Private, login-only, expired, DRM-protected, or currently unsupported media may still fail.
 - The bot does not store downloaded media permanently. Temporary files are removed after the reply is sent.
 
 ## Slash Commands
@@ -283,5 +306,5 @@ python -m compileall bot.py media_downloader.py discord_formatter.py state_manag
 
 - TikTok checking uses Selenium and ChromeDriver. If those dependencies are missing or ChromeDriver cannot run, the bot logs the TikTok error and continues checking the other sources.
 - Twitter/X checking uses public Nitter instances, which can be unreliable. Add or change instances in `config.json` if needed.
-- `cache.json`, `bot.log`, and temporary downloader files are local runtime data and should not be committed.
-- The downloader uses public URLs only. A platform can still require authentication or change its anti-bot system, in which case that particular link may fail.
+- `cache.json`, `bot.log`, temporary downloader files, and Instagram cookie files should not be committed.
+- The downloader uses public URLs plus any explicitly supplied authorized cookies. It does not bypass platform privacy controls.
