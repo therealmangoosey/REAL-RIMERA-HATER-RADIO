@@ -85,18 +85,28 @@ The downloader uses the best available video/audio formats it can access and FFm
 
 ### Instagram
 
-Instagram handling is split by media type because yt-dlp currently has known failures on image-only posts and image-only carousels, where it can report `No video formats found`. The bot therefore treats yt-dlp as the video-first path and uses separate public fallbacks for photos and Stories.
+Instagram handling is split by media type because yt-dlp can fail on image-only posts and image-only carousels with `No video formats found` even when the public post itself is accessible.
 
-Current order:
+For **public posts, photos, reels, and carousels**, the order is:
 
-1. yt-dlp anonymous attempt.
-2. For Instagram Stories: multiple public Story viewer/downloader services.
-3. For Instagram posts/reels: multiple public post/photo downloader services plus a direct public-page attempt.
-4. Optional authenticated Instagram cookies as a final fallback.
+1. `yt-dlp` anonymous attempt.
+2. `parth-dl` 1.2.1 as the dedicated no-login/no-API fallback for public posts, photos, mixed carousels, and reels.
+3. Optional authenticated Instagram cookies as the final fallback.
 
-The fallback code only accepts actual image/video responses or explicit media/download links. Website logos, screenshots, icons, HTML pages, and download buttons are rejected.
+For **public Stories**, the order is:
 
-Public third-party sites can change without notice. They only work for media the site can access publicly. Private/login-only/expired/DRM-protected content can still fail.
+1. `yt-dlp` anonymous attempt.
+2. SMDownloader's public structured resolver (`/api/extract`).
+3. A small set of public Story page fallbacks that only accept explicit media/download links.
+4. Optional authenticated Instagram cookies as the final fallback.
+
+`parth-dl` is a separate lightweight Python package with no runtime dependencies. Its documented Python API returns a single file path or a list of paths for a carousel. citeturn623233view0
+
+SMDownloader documents its `/api/extract` resolver for public Instagram posts, carousels and active Stories without requiring an Instagram login. citeturn701942search0turn775318search2
+
+The fallback code validates actual media responses and file signatures. It rejects ordinary webpage images, logos, icons, store badges, screenshots, HTML pages, download buttons, and other site assets.
+
+Public third-party services can change without notice. They only work for media the service can access publicly. Private/login-only/expired/DRM-protected content can still fail.
 
 ### Optional Instagram cookies
 
@@ -145,7 +155,7 @@ python -m compileall -q bot.py media_downloader.py instagram_fallback.py discord
 python -m unittest discover -v
 ```
 
-GitHub Actions now runs the same compile and unit-test checks on pushes and pull requests.
+GitHub Actions runs the same compile and unit-test checks on pushes and pull requests.
 
 ## Notes
 
