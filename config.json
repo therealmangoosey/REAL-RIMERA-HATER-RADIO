@@ -11,6 +11,7 @@
         "soundcloud": 0,
         "youtube": 0
     },
+    "media_download_channel_id": null,
     "polling_interval_minutes": 5,
     "flask_port": 5000,
     "enable_web_server": false,
