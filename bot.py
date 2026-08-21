@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from discord_formatter import DiscordFormatter
-from media_downloader import MediaDownloader, MediaDownloadError
+from media_downloader import DISCORD_MAX_ATTACHMENTS, MediaDownloader, MediaDownloadError
 from scrapers.social_scraper import SocialScraper
 from scrapers.tiktok_scraper import TikTokScraper
 from scrapers.twitter_scraper import TwitterScraper
@@ -152,10 +152,7 @@ class RimeraBot(commands.Bot):
                     )
                 return
 
-            # Discord limits one message to 10 attachments. Keep every item in
-            # one message by using a ZIP fallback if an Instagram post/story
-            # contains more than Discord can attach directly.
-            if len(prepared_paths) > self.media_downloader.DISCORD_MAX_ATTACHMENTS:
+            if len(prepared_paths) > DISCORD_MAX_ATTACHMENTS:
                 archive = await asyncio.to_thread(
                     self.media_downloader.create_zip,
                     prepared_paths,
@@ -164,13 +161,10 @@ class RimeraBot(commands.Bot):
                 if archive:
                     prepared_paths = [archive]
                 else:
-                    prepared_paths = prepared_paths[:self.media_downloader.DISCORD_MAX_ATTACHMENTS]
+                    prepared_paths = prepared_paths[:DISCORD_MAX_ATTACHMENTS]
                     failed.append("too-many-files-for-one-discord-message")
 
-            files = [
-                discord.File(path, filename=os.path.basename(path))
-                for path in prepared_paths
-            ]
+            files = [discord.File(path, filename=os.path.basename(path)) for path in prepared_paths]
             text = None
             if failed:
                 text = "I got the available media in one message. Some items could not be downloaded or fit Discord's single-message attachment limits."
