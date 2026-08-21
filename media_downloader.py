@@ -24,7 +24,7 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download media, trying anonymous yt-dlp first and public Instagram fallbacks second."""
+    """Download media with platform-specific fallbacks."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
         self.max_bytes = max_bytes
@@ -50,6 +50,11 @@ class MediaDownloader:
     @staticmethod
     def _is_instagram_story(url):
         return "/stories/" in url.lower()
+
+    @staticmethod
+    def _instagram_post_or_reel(url):
+        path = urlparse(url).path.lower()
+        return any(path.startswith(prefix) for prefix in ("/p/", "/reel/", "/reels/", "/tv/"))
 
     def _options(self, url, workdir, use_cookies=False):
         is_instagram = self._is_instagram(url)
@@ -86,23 +91,10 @@ class MediaDownloader:
         return info, self._files(workdir)
 
     @staticmethod
-    def _instagram_post_or_reel(url):
-        path = urlparse(url).path.lower()
-        return any(path.startswith(prefix) for prefix in ("/p/", "/reel/", "/reels/", "/tv/"))
-
-    def _instagram_photo_fallback(self, url, workdir):
-        """Recover public Instagram photos when yt-dlp has no video formats."""
-        response = self.http.get(url, timeout=18, allow_redirects=True)
-        response.raise_for_status()
-        content_type = (response.headers.get("content-type") or "").lower()
-        if "html" not in content_type:
-            return []
-
-        soup = BeautifulSoup(response.text, "lxml")
+    def _instagram_media_urls_from_html(response_text):
+        soup = BeautifulSoup(response_text, "lxml")
         candidates = []
 
-        # OpenGraph/Twitter metadata is the most stable anonymous representation
-        # for a public Instagram photo.
         for selector in (
             'meta[property="og:image"]',
             'meta[property="og:image:url"]',
@@ -114,25 +106,42 @@ class MediaDownloader:
                 if value:
                     candidates.append(value)
 
-        # Instagram sometimes embeds the image URL in JSON-LD or page scripts.
-        for tag in soup.find_all("script"):
-            text = tag.string or tag.get_text(" ", strip=False)
+        # JSON-LD can contain image fields without requiring the brittle yt-dlp API path.
+        for script in soup.find_all("script", type="application/ld+json"):
+            text = script.string or script.get_text(" ", strip=False)
+            if text:
+                candidates.extend(re.findall(r'https?://[^"\\\']+', text))
+
+        # Some Instagram HTML embeds CDN image URLs directly in scripts.
+        for script in soup.find_all("script"):
+            text = script.string or script.get_text(" ", strip=False)
             if not text:
                 continue
             for match in re.findall(r'https?://[^"\\\']+', text):
                 lower = match.lower()
-                if any(token in lower for token in ("scontent", "fbcdn", "instagram")) and any(
-                    ext in lower for ext in (".jpg", ".jpeg", ".png", ".webp")
-                ):
-                    candidates.append(match.replace("\\/", "/").replace("\\u0026", "&"))
+                if any(token in lower for token in ("scontent", "fbcdn")):
+                    candidates.append(match)
 
-        downloaded = []
+        result = []
         seen = set()
         for candidate in candidates:
-            candidate = candidate.replace("\\/", "/").replace("&amp;", "&")
-            if candidate in seen or not candidate.startswith(("http://", "https://")):
+            candidate = candidate.replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&")
+            if not candidate.startswith(("http://", "https://")) or candidate in seen:
                 continue
             seen.add(candidate)
+            result.append(candidate)
+        return result
+
+    def _instagram_photo_fallback(self, url, workdir):
+        """Download public Instagram post images without requiring video extraction."""
+        response = self.http.get(url, timeout=18, allow_redirects=True)
+        response.raise_for_status()
+        if "html" not in (response.headers.get("content-type") or "").lower():
+            return []
+
+        candidates = self._instagram_media_urls_from_html(response.text)
+        downloaded = []
+        for candidate in candidates:
             try:
                 media = self.http.get(candidate, stream=True, timeout=18, allow_redirects=True)
                 media.raise_for_status()
@@ -157,9 +166,35 @@ class MediaDownloader:
                 continue
         return downloaded
 
+    def _instagram_public_post_fallbacks(self, url, workdir):
+        """Try photo metadata after yt-dlp, including a public-page HTML route."""
+        errors = []
+        try:
+            files = self._instagram_photo_fallback(url, workdir)
+            if files:
+                return files
+            errors.append("no public image metadata")
+        except Exception as exc:
+            errors.append(str(exc))
+
+        # A trailing slash/no-query variant can expose the public OG metadata even
+        # when Instagram's redirect/API response is problematic.
+        try:
+            parsed = urlparse(url)
+            clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if clean_url != url:
+                files = self._instagram_photo_fallback(clean_url, workdir)
+                if files:
+                    return files
+                errors.append("clean URL contained no public image metadata")
+        except Exception as exc:
+            errors.append(str(exc))
+        return []
+
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
+            anonymous_error = ""
             try:
                 info, files = self._extract(url, workdir, use_cookies=False)
                 if files:
@@ -181,12 +216,11 @@ class MediaDownloader:
                         "Instagram anonymous Story fallback chain failed: %s", fallback_error
                     )
             elif self._instagram_post_or_reel(url):
-                # A public photo post can legitimately have no video formats. Do not
-                # report that as a total failure: fetch the public image metadata instead.
                 try:
-                    files = self._instagram_photo_fallback(url, workdir)
+                    files = self._instagram_public_post_fallbacks(url, workdir)
                     if files:
                         return workdir, files, {"source": "anonymous-instagram-photo"}
+                    fallback_error = "public Instagram photo metadata returned no usable image"
                 except Exception as exc:
                     fallback_error = str(exc)
                     logging.getLogger("rimera-bot").warning(
@@ -212,6 +246,11 @@ class MediaDownloader:
                     "Instagram Story could not be downloaded. "
                     f"Anonymous yt-dlp: {anonymous_error}. "
                     f"Public fallbacks: {fallback_error or 'no fallback media returned'}."
+                )
+            if self._instagram_post_or_reel(url):
+                raise MediaDownloadError(
+                    "Instagram post/reel could not be downloaded. "
+                    f"yt-dlp: {anonymous_error}. Public photo fallback: {fallback_error or 'not available'}."
                 )
             raise MediaDownloadError(f"No media was returned by yt-dlp: {anonymous_error}")
         except MediaDownloadError:
