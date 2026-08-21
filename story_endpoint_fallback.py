@@ -85,6 +85,8 @@ class StoryEndpointFallback:
             parsed = urlparse(candidate)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return
+            # A provider can return its media host as an explicit field before
+            # returning the actual file path. Never treat the bare origin as media.
             if parsed.path.rstrip("/") == "":
                 return
             found.append(candidate)
