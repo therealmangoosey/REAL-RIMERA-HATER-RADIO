@@ -4,7 +4,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import zipfile
 from pathlib import Path
 
 import yt_dlp
@@ -34,13 +33,13 @@ class MediaDownloader:
         return "instagram.com/" in url.lower() or "instagr.am/" in url.lower()
 
     def _options(self, url, workdir):
-        # Instagram posts/stories can contain multiple media items. We only
-        # enable playlist extraction for Instagram so ordinary YouTube etc.
-        # links do not unexpectedly expand into an entire playlist.
+        # Instagram URLs may expand to multiple media entries (carousels/stories).
+        # Other platforms stay single-item unless their extractor returns a single
+        # media entry itself.
         options = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
-            "outtmpl": os.path.join(workdir, "%(playlist_index)s-%(id)s.%(ext)s"),
+            "outtmpl": os.path.join(workdir, "%(playlist_index|0)03d-%(id)s.%(ext)s"),
             "noplaylist": not self._is_instagram(url),
             "quiet": True,
             "no_warnings": True,
@@ -52,8 +51,7 @@ class MediaDownloader:
             "overwrites": True,
             "ignoreerrors": True,
         }
-        # Optional browser/session cookies make public-to-the-bot Instagram
-        # Stories and login-gated posts work when the operator is authorized.
+        # Optional cookies allow authorized access to login-gated Instagram media.
         if self.cookies_file and os.path.isfile(self.cookies_file):
             options["cookiefile"] = self.cookies_file
         return options
@@ -112,13 +110,6 @@ class MediaDownloader:
                 return output
 
         return None
-
-    def create_zip(self, files, workdir):
-        zip_path = os.path.join(workdir, "rimera-media.zip")
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            for path in files:
-                archive.write(path, arcname=os.path.basename(path))
-        return zip_path if os.path.getsize(zip_path) <= self.max_bytes else None
 
     @staticmethod
     def cleanup(workdir):
