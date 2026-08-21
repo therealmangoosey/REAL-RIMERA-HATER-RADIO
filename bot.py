@@ -47,6 +47,7 @@ def is_admin_or_super_user():
 
 
 SHOP_PUBLIC_DELAY_SECONDS = 120
+DISCORD_REQUEST_LIMIT = 25 * 1024 * 1024
 
 
 def load_config():
@@ -121,49 +122,60 @@ class RimeraBot(commands.Bot):
         urls = list(dict.fromkeys(self.media_downloader.extract_urls(message.content)))[:3]
         if not urls:
             return
+        fetching_message = None
+        try:
+            fetching_message = await message.reply("Fetching…", mention_author=False)
+        except discord.DiscordException as exc:
+            logger.warning("Could not send fetching message: %s", exc)
         async with self.media_download_semaphore:
-            await self.download_media_reply(message, urls)
+            await self.download_media_reply(message, urls, fetching_message)
 
     @staticmethod
     def _make_discord_files(paths):
         return [discord.File(path, filename=os.path.basename(path)) for path in paths]
 
-    async def _send_private_one(self, user, path, note, fallback_limit=10_000_000):
-        """Send exactly one file, retrying with a stricter limit if Discord returns 413."""
+    @staticmethod
+    def _chunk_paths(paths):
+        """Split attachments by Discord's attachment count and 25 MiB request limit."""
+        chunks = []
+        current = []
+        current_bytes = 0
+        for path in paths:
+            size = os.path.getsize(path)
+            if current and (len(current) >= DISCORD_MAX_ATTACHMENTS or current_bytes + size > DISCORD_REQUEST_LIMIT - 256 * 1024):
+                chunks.append(current)
+                current = []
+                current_bytes = 0
+            current.append(path)
+            current_bytes += size
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def _send_public_batch(self, message, paths, content=None):
+        """Send one public Discord message for a batch; retry a 413 by shrinking the batch."""
+        if not paths:
+            return
         try:
-            await user.send(
-                content=note,
-                file=discord.File(path, filename=os.path.basename(path)),
+            await message.reply(
+                content=content,
+                files=self._make_discord_files(paths),
+                mention_author=False,
             )
-            return True
-        except discord.HTTPException as first_error:
-            if first_error.status != 413:
+            return
+        except discord.HTTPException as exc:
+            if exc.status != 413 or len(paths) <= 1:
                 raise
 
-        stricter = await asyncio.to_thread(
-            self.media_downloader.fit_for_discord,
-            path,
-            fallback_limit,
-        )
-        if stricter and stricter != path:
-            try:
-                await user.send(
-                    content=(
-                        f"{note}\nDiscord rejected the first size, so I recompressed it "
-                        f"to {os.path.getsize(stricter) / 1_000_000:.2f} MB using the stricter limit."
-                    ),
-                    file=discord.File(stricter, filename=os.path.basename(stricter)),
-                )
-                return True
-            except discord.HTTPException:
-                pass
-        return False
+        midpoint = max(1, len(paths) // 2)
+        await self._send_public_batch(message, paths[:midpoint], content)
+        await self._send_public_batch(message, paths[midpoint:], None)
 
-    async def download_media_reply(self, message, urls):
+    async def download_media_reply(self, message, urls, fetching_message=None):
         prepared_paths = []
-        compressed_private = []
         workdirs = []
         failed = []
+        compression_notes = {}
         try:
             for url in urls:
                 try:
@@ -175,10 +187,14 @@ class RimeraBot(commands.Bot):
                         if not fitted:
                             failed.append(url)
                             continue
+                        prepared_paths.append(fitted)
                         if fitted != path or original_size > self.media_downloader.max_bytes:
-                            compressed_private.append((fitted, url, original_size))
-                        else:
-                            prepared_paths.append(fitted)
+                            compressed_size = os.path.getsize(fitted)
+                            compression_notes[fitted] = (
+                                f"Compressed from {original_size / 1_000_000:.2f} MB to "
+                                f"{compressed_size / 1_000_000:.2f} MB to fit Discord while preserving "
+                                "as much quality as possible."
+                            )
                 except MediaDownloadError as exc:
                     logger.warning(f"Could not download {url}: {exc}")
                     failed.append(url)
@@ -186,60 +202,41 @@ class RimeraBot(commands.Bot):
                     logger.exception(f"Unexpected media download error for {url}: {exc}")
                     failed.append(url)
 
-            # Keep uncompressed media together in the public reply, within Discord's
-            # attachment-count limit. Oversized/compressed files are intentionally
-            # separate so a 413 can never invalidate the whole media batch.
-            public_paths = prepared_paths[:DISCORD_MAX_ATTACHMENTS]
-            overflow_paths = prepared_paths[DISCORD_MAX_ATTACHMENTS:]
-            text_parts = []
-            if failed:
-                text_parts.append("Some links/media items could not be downloaded, but I got the rest.")
-            if public_paths:
+            if prepared_paths:
+                chunks = self._chunk_paths(prepared_paths)
+                batch_tasks = []
+                for index, chunk in enumerate(chunks):
+                    notes = [compression_notes[path] for path in chunk if path in compression_notes]
+                    content_parts = []
+                    if index == 0 and failed:
+                        content_parts.append("Some links/media items could not be downloaded, but I got the rest.")
+                    if notes:
+                        content_parts.extend(notes)
+                    content = "\n".join(content_parts) if content_parts else None
+                    batch_tasks.append(self._send_public_batch(message, chunk, content))
+                # Start every Discord message at once instead of sending overflow privately/sequentially.
+                await asyncio.gather(*batch_tasks)
+            elif failed:
                 await message.reply(
-                    content=" ".join(text_parts) or None,
-                    files=self._make_discord_files(public_paths),
+                    content="Some links/media items could not be downloaded.",
                     mention_author=False,
                 )
-            elif text_parts:
-                await message.reply(content=" ".join(text_parts), mention_author=False)
-
-            # Normal overflow is also one file per private message.
-            for path in overflow_paths:
-                try:
-                    await self._send_private_one(
-                        message.author,
-                        path,
-                        "Extra media from your download request:",
-                    )
-                except discord.Forbidden:
-                    logger.warning("Could not DM overflow media to user %s", message.author.id)
-                    break
-                except discord.HTTPException as exc:
-                    logger.warning("Could not DM overflow media %s: %s", path, exc)
-
-            # Every file that was compressed gets its own message and an explicit note.
-            for fitted, url, original_size in compressed_private:
-                compressed_size = os.path.getsize(fitted)
-                limit_mb = self.media_downloader.max_bytes / 1_000_000
-                note = (
-                    f"Compressed this file from {original_size / 1_000_000:.2f} MB to "
-                    f"{compressed_size / 1_000_000:.2f} MB to fit Discord's {limit_mb:.0f} MB "
-                    "upload limit, while preserving as much quality as possible."
+        except discord.HTTPException as exc:
+            logger.error("Could not send public media batch: %s", exc)
+            try:
+                await message.reply(
+                    content="I downloaded the media but Discord rejected one or more uploads."
                 )
-                try:
-                    sent = await self._send_private_one(
-                        message.author,
-                        fitted,
-                        note,
-                    )
-                    if not sent:
-                        logger.warning("Discord rejected compressed media for %s", url)
-                except discord.Forbidden:
-                    logger.warning("Could not DM compressed media to user %s", message.author.id)
-                    break
-                except discord.HTTPException as exc:
-                    logger.warning("Could not DM compressed media %s: %s", fitted, exc)
+            except discord.DiscordException:
+                pass
         finally:
+            if fetching_message:
+                try:
+                    await fetching_message.delete()
+                except discord.NotFound:
+                    pass
+                except discord.DiscordException as exc:
+                    logger.warning("Could not delete fetching message: %s", exc)
             for workdir in workdirs:
                 self.media_downloader.cleanup(workdir)
 
