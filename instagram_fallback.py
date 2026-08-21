@@ -61,6 +61,7 @@ class InstagramPublicStoryFallback:
         "/search", "/stories", "/download", "/api/download", "/api/fetch", "/api/fetch-story",
     )
     MEDIA_EXTENSIONS = (".mp4", ".jpg", ".jpeg", ".png", ".webp", ".m4v", ".mov")
+    BLOCKED_FILENAMES = ("favicon", "logo", "icon", "download", "arrow", "button", "loader", "placeholder")
     ABSOLUTE_URL_RE = re.compile(r"https?://[^\"'<>\s]+", re.IGNORECASE)
     ENDPOINT_RE = re.compile(
         r"(?:fetch|axios\.(?:get|post)|url\s*:\s*)\(?(?:\s*[\"'])(/[^\"']+)[\"']",
@@ -90,6 +91,9 @@ class InstagramPublicStoryFallback:
         parsed = urlparse(absolute)
         if parsed.scheme not in {"http", "https"}:
             return False
+        path_name = os.path.basename(parsed.path).lower()
+        if any(token in path_name for token in cls.BLOCKED_FILENAMES):
+            return False
         lower_path = parsed.path.lower()
         lower_all = absolute.lower()
         if any(lower_path.endswith(ext) for ext in cls.MEDIA_EXTENSIONS):
@@ -115,7 +119,6 @@ class InstagramPublicStoryFallback:
     def _candidate_media(cls, response_text, base_url):
         found = set()
         soup = BeautifulSoup(response_text, "lxml")
-
         for tag in soup.find_all(True):
             for attr in (
                 "href", "src", "poster", "content", "data-src", "data-url", "data-download",
@@ -144,7 +147,6 @@ class InstagramPublicStoryFallback:
         for match in cls.ABSOLUTE_URL_RE.findall(html.unescape(response_text).replace("\\/", "/")):
             if cls._looks_like_media_url(match):
                 found.add(match)
-
         return sorted(found)
 
     def _discover_endpoints(self, page_url, page_text):
@@ -223,6 +225,52 @@ class InstagramPublicStoryFallback:
                 continue
         return []
 
+    @staticmethod
+    def _valid_media_bytes(data, content_type):
+        """Reject website assets such as icons, SVGs, and download buttons."""
+        content_type = (content_type or "").lower()
+        if "video/" in content_type or "image/" in content_type:
+            return True
+        if data.startswith(b"\x00\x00\x00") and b"ftyp" in data[:32]:
+            return True
+        if data.startswith(b"\xFF\xD8\xFF") or data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return True
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            return True
+        return False
+
+    def _download_media(self, media_urls, output_dir, service_name):
+        downloaded = []
+        for media_url in media_urls:
+            try:
+                with self.session.get(media_url, stream=True, timeout=self.timeout, allow_redirects=True) as response:
+                    response.raise_for_status()
+                    content_type = (response.headers.get("content-type") or "").lower()
+                    if any(x in content_type for x in ("text/html", "text/css", "application/javascript", "image/svg")):
+                        logger.debug("%s returned non-media content type for %s: %s", service_name, media_url, content_type)
+                        continue
+                    first_chunk = next(response.iter_content(chunk_size=64 * 1024), b"")
+                    if not self._valid_media_bytes(first_chunk, content_type):
+                        logger.debug("%s returned a non-media asset for %s", service_name, media_url)
+                        continue
+
+                    extension = os.path.splitext(urlparse(response.url).path)[1].lower()
+                    if extension not in self.MEDIA_EXTENSIONS:
+                        extension = ".mp4" if "video/" in content_type or (b"ftyp" in first_chunk[:32] and first_chunk.startswith(b"\x00\x00\x00")) else ".jpg"
+                    output = os.path.join(output_dir, f"story-fallback-{len(downloaded)+1:03d}{extension}")
+                    with open(output, "wb") as handle:
+                        handle.write(first_chunk)
+                        for chunk in response.iter_content(chunk_size=262144):
+                            if chunk:
+                                handle.write(chunk)
+                    if os.path.getsize(output) >= 1024:
+                        downloaded.append(output)
+                    else:
+                        os.remove(output)
+            except requests.RequestException as exc:
+                logger.debug("%s media download failed: %s", service_name, exc)
+        return downloaded
+
     def fetch(self, instagram_url, output_dir):
         username = self.username_from_url(instagram_url)
         if not username:
@@ -233,53 +281,27 @@ class InstagramPublicStoryFallback:
             name = service["name"]
             base = service["base"]
             for page_pattern in service["pages"]:
-                page_url = base + page_pattern.format(
-                    username=quote_plus(username),
-                    url=quote_plus(instagram_url),
-                )
+                page_url = base + page_pattern.format(username=quote_plus(username), url=quote_plus(instagram_url))
                 try:
                     page = self.session.get(page_url, timeout=self.timeout)
                     if page.status_code >= 400:
                         continue
-
                     media_urls = self._candidate_media(page.text, page.url)
                     if not media_urls:
                         media_urls = self._form_search(page.url, page.text, username, instagram_url)
                     if not media_urls:
                         for endpoint in self._discover_endpoints(page.url, page.text):
-                            target = urljoin(page.url, endpoint)
-                            media_urls = self._request_variants(target, username, instagram_url)
+                            media_urls = self._request_variants(urljoin(page.url, endpoint), username, instagram_url)
                             if media_urls:
                                 break
                     if not media_urls:
                         continue
-
-                    downloaded = []
-                    for index, media_url in enumerate(media_urls, 1):
-                        try:
-                            with self.session.get(media_url, stream=True, timeout=self.timeout, allow_redirects=True) as response:
-                                response.raise_for_status()
-                                content_type = (response.headers.get("content-type") or "").lower()
-                                extension = os.path.splitext(urlparse(response.url).path)[1].lower()
-                                if extension not in self.MEDIA_EXTENSIONS:
-                                    extension = ".mp4" if "video/" in content_type else ".jpg" if "image/" in content_type else None
-                                if not extension:
-                                    continue
-                                output = os.path.join(output_dir, f"story-fallback-{len(downloaded)+1:03d}{extension}")
-                                with open(output, "wb") as handle:
-                                    for chunk in response.iter_content(chunk_size=262144):
-                                        if chunk:
-                                            handle.write(chunk)
-                                if os.path.getsize(output) > 0:
-                                    downloaded.append(output)
-                        except requests.RequestException as exc:
-                            logger.debug("%s media download failed: %s", name, exc)
-
+                    downloaded = self._download_media(media_urls, output_dir, name)
                     if downloaded:
-                        logger.info("%s returned %d Story media item(s) for @%s", name, len(downloaded), username)
+                        logger.info("%s returned %d valid Story media item(s) for @%s", name, len(downloaded), username)
                         return downloaded
-                    errors.append(f"{name}: media links were found but could not be downloaded")
+                    errors.append(f"{name}: candidate links were not actual media")
                 except Exception as exc:
                     errors.append(f"{name}: {exc}")
 
-        raise InstagramFallbackError(" | ".join(errors) if errors else "No public Story fallback returned media.")
+        raise InstagramFallbackError(" | ".join(errors) if errors else "No public Story fallback returned valid media.")
