@@ -33,6 +33,7 @@ SOURCE_LABELS = {
     'default': 'Default', 'website': 'Website', 'twitter': 'Twitter',
     'tiktok': 'TikTok', 'instagram': 'Instagram', 'spotify': 'Spotify',
     'apple_music': 'Apple Music', 'soundcloud': 'SoundCloud', 'youtube': 'YouTube',
+    'tumblr': 'Tumblr',
 }
 SUPER_ADMIN_ID = 1300260018691637308
 
@@ -63,7 +64,8 @@ def load_config():
     loaded_config.setdefault('soundcloud_url', 'https://soundcloud.app.goo.gl/HuhB6bRZBe9Qutt68')
     loaded_config.setdefault('youtube_url', 'https://youtube.com/channel/UCeliKm-RLwRJNWJLOhv3lNw')
     loaded_config.setdefault('youtube_channel_id', 'UCeliKm-RLwRJNWJLOhv3lNw')
-    loaded_config.setdefault('initial_password', 'Phone118')
+    loaded_config.setdefault('tumblr_url', '')
+    loaded_config.setdefault('initial_password', 'CHANGE_ME')
     loaded_config.setdefault('initial_subscribers', [])
     return loaded_config
 
@@ -158,14 +160,12 @@ class RimeraBot(commands.Bot):
 
             public_paths = prepared_paths[:DISCORD_MAX_ATTACHMENTS]
             private_paths = prepared_paths[DISCORD_MAX_ATTACHMENTS:]
-            text = None
+            text_parts = []
             if failed:
-                text = "Some links/media items could not be downloaded, but I got the rest."
-            if private_paths:
-                text = (text + " " if text else "") + "The extra media was sent to you privately."
+                text_parts.append("Some links/media items could not be downloaded, but I got the rest.")
 
             await message.reply(
-                content=text,
+                content=" ".join(text_parts) or None,
                 files=self._make_discord_files(public_paths),
                 mention_author=False,
             )
@@ -179,10 +179,22 @@ class RimeraBot(commands.Bot):
                             content="Extra media from your download request:",
                             files=self._make_discord_files(batch),
                         )
+                    await message.reply(
+                        content="The extra media was sent to you privately.",
+                        mention_author=False,
+                    )
                 except discord.Forbidden:
                     logger.warning(f"Could not DM media to user {message.author.id}; DMs are closed or blocked.")
+                    await message.reply(
+                        content="I couldn't privately send the extra media because your DMs are closed or blocked.",
+                        mention_author=False,
+                    )
                 except discord.DiscordException as exc:
                     logger.warning(f"Could not privately send extra media to user {message.author.id}: {exc}")
+                    await message.reply(
+                        content="I downloaded the extra media, but Discord wouldn't let me send it privately.",
+                        mention_author=False,
+                    )
         finally:
             for workdir in workdirs:
                 self.media_downloader.cleanup(workdir)
@@ -295,6 +307,7 @@ class RimeraBot(commands.Bot):
             ('apple_music', 'Apple Music', self.social_scraper.get_apple_music_updates),
             ('soundcloud', 'SoundCloud', self.social_scraper.get_soundcloud_updates),
             ('youtube', 'YouTube', self.social_scraper.get_youtube_updates),
+            ('tumblr', 'Tumblr', self.social_scraper.get_tumblr_updates),
         ]
         for source_key, source_name, fetcher in source_checks:
             try:
@@ -347,7 +360,7 @@ class WebRecommendationModal(discord.ui.Modal, title='Website Recommendation'):
             await interaction.followup.send(f"❌ Error: I don't have access to the recommendation channel. Please ensure I have 'View Channel' and 'Send Messages' permissions in <#{target_channel_id}>.")
         except discord.HTTPException as e:
             logger.error(f"Failed to send recommendation: {e}")
-            await interaction.followup.send("❌ Something went wrong while submitting your recommendation.")
+            await interaction.followup.send("❌ Something went wrong while submitting the recommendation.")
 
 
 bot = RimeraBot()
@@ -373,6 +386,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="Apple Music", value=config.get('apple_music_url') or "Not set", inline=False)
     embed.add_field(name="SoundCloud", value=config.get('soundcloud_url') or "Not set", inline=False)
     embed.add_field(name="YouTube", value=config.get('youtube_url') or config.get('youtube_channel_id') or "Not set", inline=False)
+    embed.add_field(name="Tumblr", value=config.get('tumblr_url') or "Not set", inline=False)
     media_channel = config.get('media_download_channel_id')
     embed.add_field(name="Media downloader", value=f"<#{media_channel}>" if media_channel else "Not set", inline=False)
     embed.add_field(name="Polling", value=f"{config.get('polling_interval_minutes', 5)} minutes", inline=True)
@@ -420,7 +434,7 @@ async def test_ping(interaction: discord.Interaction, ping_type: app_commands.Ch
         else:
             await interaction.followup.send("No shop products found.")
     else:
-        fetchers = [bot.social_scraper.get_instagram_updates, bot.social_scraper.get_youtube_updates, bot.social_scraper.get_spotify_updates, bot.social_scraper.get_apple_music_updates, bot.social_scraper.get_soundcloud_updates]
+        fetchers = [bot.social_scraper.get_instagram_updates, bot.social_scraper.get_youtube_updates, bot.social_scraper.get_spotify_updates, bot.social_scraper.get_apple_music_updates, bot.social_scraper.get_soundcloud_updates, bot.social_scraper.get_tumblr_updates]
         found_item = None
         for fetcher in fetchers:
             items = await asyncio.to_thread(fetcher)
@@ -495,6 +509,12 @@ async def set_youtube_channel(interaction: discord.Interaction, channel: discord
     await set_source_channel(interaction, 'youtube', channel)
 
 
+@bot.tree.command(name="set-tumblr-channel", description="Set the Tumblr update channel")
+@is_admin_or_super_user()
+async def set_tumblr_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await set_source_channel(interaction, 'tumblr', channel)
+
+
 @bot.tree.command(name="set-media-channel", description="Set the channel where social links are automatically downloaded")
 @is_admin_or_super_user()
 async def set_media_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -514,7 +534,7 @@ async def media_channel(interaction: discord.Interaction):
 
 @bot.tree.command(name="initial", description="Register for private early shop alerts")
 async def initial(interaction: discord.Interaction, password: str):
-    if password != config.get('initial_password', 'Phone118'):
+    if password != config.get('initial_password', 'CHANGE_ME'):
         await interaction.response.send_message("Incorrect password.", ephemeral=True)
         return
     subscriber_id = str(interaction.user.id)
@@ -554,6 +574,7 @@ async def check_socials(interaction: discord.Interaction):
         ('apple_music', 'Apple Music', bot.social_scraper.get_apple_music_updates),
         ('soundcloud', 'SoundCloud', bot.social_scraper.get_soundcloud_updates),
         ('youtube', 'YouTube', bot.social_scraper.get_youtube_updates),
+        ('tumblr', 'Tumblr', bot.social_scraper.get_tumblr_updates),
     ]
     checked_count = 0
     sent_count = 0
