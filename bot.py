@@ -122,6 +122,10 @@ class RimeraBot(commands.Bot):
         async with self.media_download_semaphore:
             await self.download_media_reply(message, urls)
 
+    @staticmethod
+    def _make_discord_files(paths):
+        return [discord.File(path, filename=os.path.basename(path)) for path in paths]
+
     async def download_media_reply(self, message, urls):
         prepared_paths = []
         workdirs = []
@@ -152,23 +156,33 @@ class RimeraBot(commands.Bot):
                     )
                 return
 
-            if len(prepared_paths) > DISCORD_MAX_ATTACHMENTS:
-                archive = await asyncio.to_thread(
-                    self.media_downloader.create_zip,
-                    prepared_paths,
-                    workdirs[0],
-                )
-                if archive:
-                    prepared_paths = [archive]
-                else:
-                    prepared_paths = prepared_paths[:DISCORD_MAX_ATTACHMENTS]
-                    failed.append("too-many-files-for-one-discord-message")
-
-            files = [discord.File(path, filename=os.path.basename(path)) for path in prepared_paths]
+            public_paths = prepared_paths[:DISCORD_MAX_ATTACHMENTS]
+            private_paths = prepared_paths[DISCORD_MAX_ATTACHMENTS:]
             text = None
             if failed:
-                text = "I got the available media in one message. Some items could not be downloaded or fit Discord's single-message attachment limits."
-            await message.reply(content=text, files=files, mention_author=False)
+                text = "Some links/media items could not be downloaded, but I got the rest."
+            if private_paths:
+                text = (text + " " if text else "") + "The extra media was sent to you privately."
+
+            await message.reply(
+                content=text,
+                files=self._make_discord_files(public_paths),
+                mention_author=False,
+            )
+
+            if private_paths:
+                try:
+                    user = message.author
+                    for start in range(0, len(private_paths), DISCORD_MAX_ATTACHMENTS):
+                        batch = private_paths[start:start + DISCORD_MAX_ATTACHMENTS]
+                        await user.send(
+                            content="Extra media from your download request:",
+                            files=self._make_discord_files(batch),
+                        )
+                except discord.Forbidden:
+                    logger.warning(f"Could not DM media to user {message.author.id}; DMs are closed or blocked.")
+                except discord.DiscordException as exc:
+                    logger.warning(f"Could not privately send extra media to user {message.author.id}: {exc}")
         finally:
             for workdir in workdirs:
                 self.media_downloader.cleanup(workdir)
