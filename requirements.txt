@@ -6,4 +6,5 @@ flask
 lxml
 webdriver-manager
 python-dotenv
+parth-dl==1.2.1
 yt-dlp>=2026.7.4,<2026.8
