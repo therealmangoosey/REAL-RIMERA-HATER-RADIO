@@ -152,24 +152,23 @@ class RimeraBot(commands.Bot):
             chunks.append(current)
         return chunks
 
-    async def _send_public_batch(self, message, paths, content=None):
-        """Send one public Discord message for a batch; retry a 413 by shrinking the batch."""
+    async def _send_public_batch(self, reply_to, paths, content=None):
+        """Send one public batch as a reply to the previous message; return the sent message."""
         if not paths:
-            return
+            return reply_to
         try:
-            await message.reply(
+            return await reply_to.reply(
                 content=content,
                 files=self._make_discord_files(paths),
                 mention_author=False,
             )
-            return
         except discord.HTTPException as exc:
             if exc.status != 413 or len(paths) <= 1:
                 raise
 
         midpoint = max(1, len(paths) // 2)
-        await self._send_public_batch(message, paths[:midpoint], content)
-        await self._send_public_batch(message, paths[midpoint:], None)
+        first_message = await self._send_public_batch(reply_to, paths[:midpoint], content)
+        return await self._send_public_batch(first_message, paths[midpoint:], None)
 
     async def download_media_reply(self, message, urls, fetching_message=None):
         prepared_paths = []
@@ -204,7 +203,7 @@ class RimeraBot(commands.Bot):
 
             if prepared_paths:
                 chunks = self._chunk_paths(prepared_paths)
-                batch_tasks = []
+                previous_message = message
                 for index, chunk in enumerate(chunks):
                     notes = [compression_notes[path] for path in chunk if path in compression_notes]
                     content_parts = []
@@ -213,9 +212,7 @@ class RimeraBot(commands.Bot):
                     if notes:
                         content_parts.extend(notes)
                     content = "\n".join(content_parts) if content_parts else None
-                    batch_tasks.append(self._send_public_batch(message, chunk, content))
-                # Start every Discord message at once instead of sending overflow privately/sequentially.
-                await asyncio.gather(*batch_tasks)
+                    previous_message = await self._send_public_batch(previous_message, chunk, content)
             elif failed:
                 await message.reply(
                     content="Some links/media items could not be downloaded.",
