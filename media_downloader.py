@@ -24,6 +24,7 @@ class MediaDownloader:
     """Download media, trying anonymous yt-dlp first and public fallbacks second."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
+        self.max_bytes = max_bytes
         configured = os.getenv("YT_DLP_COOKIES_FILE", "").strip()
         candidates = [configured, "instagram-cookies.txt", os.path.expanduser("~/instagram-cookies.txt")]
         self.cookies_file = next((path for path in candidates if path and os.path.isfile(path)), None)
@@ -57,6 +58,7 @@ class MediaDownloader:
             "socket_timeout": 15,
             "overwrites": True,
             "ignoreerrors": False,
+            "impersonate": [],
         }
         if use_cookies and self.cookies_file:
             options["cookiefile"] = self.cookies_file
@@ -77,7 +79,6 @@ class MediaDownloader:
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
-            # 1. Always try yt-dlp anonymously first.
             try:
                 info, files = self._extract(url, workdir, use_cookies=False)
                 if files:
@@ -88,8 +89,6 @@ class MediaDownloader:
                 anonymous_error = "yt-dlp returned no media"
 
             fallback_error = None
-
-            # 2. For Instagram Stories, try multiple free public web viewers.
             if self._is_instagram_story(url):
                 try:
                     files = self.instagram_fallback.fetch(url, workdir)
@@ -102,7 +101,6 @@ class MediaDownloader:
                         fallback_error,
                     )
 
-            # 3. Optional authorized cookies are a final fallback.
             if self.cookies_file:
                 try:
                     info, files = self._extract(url, workdir, use_cookies=True)
