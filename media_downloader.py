@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yt_dlp
 
+from instagram_fallback import InstagramFallbackError, InstagramPublicStoryFallback
+
 DISCORD_FREE_LIMIT = 20 * 1024 * 1024
 DISCORD_MAX_ATTACHMENTS = 10
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
@@ -18,12 +20,13 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download media, trying anonymous access first and optional cookies second."""
+    """Download media, trying anonymous yt-dlp first and public fallbacks second."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
         configured = os.getenv("YT_DLP_COOKIES_FILE", "").strip()
         candidates = [configured, "instagram-cookies.txt", os.path.expanduser("~/instagram-cookies.txt")]
         self.cookies_file = next((path for path in candidates if path and os.path.isfile(path)), None)
+        self.instagram_fallback = InstagramPublicStoryFallback()
 
     @staticmethod
     def extract_urls(text):
@@ -73,32 +76,48 @@ class MediaDownloader:
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
-            # Always try anonymously first. Public media therefore never receives
-            # an Instagram session cookie unnecessarily.
-            info, files = self._extract(url, workdir, use_cookies=False)
-            if files:
-                return workdir, files, info
-
-            # Only fall back to an authorized session if one was explicitly supplied.
-            if self.cookies_file:
-                info, files = self._extract(url, workdir, use_cookies=True)
+            # 1. Anonymous yt-dlp first.
+            try:
+                info, files = self._extract(url, workdir, use_cookies=False)
                 if files:
                     return workdir, files, info
+            except Exception as exc:
+                anonymous_error = str(exc)
+            else:
+                anonymous_error = "yt-dlp returned no media"
+
+            # 2. Free anonymous public Story web fallback for Instagram Stories.
+            if self._is_instagram_story(url):
+                try:
+                    files = self.instagram_fallback.fetch(url, workdir)
+                    if files:
+                        return workdir, files, {"source": "anonymous-web-fallback"}
+                except InstagramFallbackError:
+                    pass
+
+            # 3. Optional authorized cookie fallback last.
+            if self.cookies_file:
+                try:
+                    info, files = self._extract(url, workdir, use_cookies=True)
+                    if files:
+                        return workdir, files, info
+                except Exception as cookie_error:
+                    if self._is_instagram_story(url):
+                        raise MediaDownloadError(
+                            f"Instagram Story could not be accessed anonymously or with the configured session: {cookie_error}"
+                        ) from cookie_error
 
             if self._is_instagram_story(url):
                 raise MediaDownloadError(
-                    "Instagram requires login for this Story. No authorized cookie session is configured."
+                    f"Instagram Story is not publicly accessible. Anonymous download failed: {anonymous_error}"
                 )
-            raise MediaDownloadError("No media was returned by yt-dlp.")
+            raise MediaDownloadError(f"No media was returned by yt-dlp: {anonymous_error}")
         except MediaDownloadError:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
         except Exception as exc:
             shutil.rmtree(workdir, ignore_errors=True)
-            message = str(exc)
-            if self._is_instagram_story(url) and "log in" in message.lower() and not self.cookies_file:
-                message = "Instagram requires login for this Story. No authorized cookie session is configured."
-            raise MediaDownloadError(message) from exc
+            raise MediaDownloadError(str(exc)) from exc
 
     def fit_for_discord(self, path):
         if os.path.getsize(path) <= self.max_bytes:
