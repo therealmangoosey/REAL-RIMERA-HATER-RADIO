@@ -123,7 +123,7 @@ class RimeraBot(commands.Bot):
             await self.download_media_reply(message, urls)
 
     async def download_media_reply(self, message, urls):
-        files = []
+        prepared_paths = []
         workdirs = []
         failed = []
         try:
@@ -131,10 +131,10 @@ class RimeraBot(commands.Bot):
                 try:
                     workdir, downloaded, _ = await asyncio.to_thread(self.media_downloader.download, url)
                     workdirs.append(workdir)
-                    for path in downloaded[:10 - len(files)]:
+                    for path in downloaded:
                         fitted = await asyncio.to_thread(self.media_downloader.fit_for_discord, path)
                         if fitted:
-                            files.append(discord.File(fitted, filename=os.path.basename(fitted)))
+                            prepared_paths.append(fitted)
                         else:
                             failed.append(url)
                 except MediaDownloadError as exc:
@@ -143,14 +143,38 @@ class RimeraBot(commands.Bot):
                 except Exception as exc:
                     logger.exception(f"Unexpected media download error for {url}: {exc}")
                     failed.append(url)
-            if files:
-                text = "Some links could not be downloaded, but I got the rest." if failed else None
-                await message.reply(content=text, files=files, mention_author=False)
-            elif failed:
-                await message.reply(
-                    "I couldn't download that link. It may be private, unsupported, unavailable, or too large for Discord.",
-                    mention_author=False,
+
+            if not prepared_paths:
+                if failed:
+                    await message.reply(
+                        "I couldn't download that link. It may be private, unsupported, unavailable, or too large for Discord.",
+                        mention_author=False,
+                    )
+                return
+
+            # Discord limits one message to 10 attachments. Keep every item in
+            # one message by using a ZIP fallback if an Instagram post/story
+            # contains more than Discord can attach directly.
+            if len(prepared_paths) > self.media_downloader.DISCORD_MAX_ATTACHMENTS:
+                archive = await asyncio.to_thread(
+                    self.media_downloader.create_zip,
+                    prepared_paths,
+                    workdirs[0],
                 )
+                if archive:
+                    prepared_paths = [archive]
+                else:
+                    prepared_paths = prepared_paths[:self.media_downloader.DISCORD_MAX_ATTACHMENTS]
+                    failed.append("too-many-files-for-one-discord-message")
+
+            files = [
+                discord.File(path, filename=os.path.basename(path))
+                for path in prepared_paths
+            ]
+            text = None
+            if failed:
+                text = "I got the available media in one message. Some items could not be downloaded or fit Discord's single-message attachment limits."
+            await message.reply(content=text, files=files, mention_author=False)
         finally:
             for workdir in workdirs:
                 self.media_downloader.cleanup(workdir)
