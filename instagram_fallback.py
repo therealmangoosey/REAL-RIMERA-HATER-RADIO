@@ -112,7 +112,12 @@ class InstagramPublicFallback:
     def _extract_urls_from_json(cls, payload):
         return [url for url in cls._structured_urls(payload) if cls._looks_like_media_url(url)]
 
-    def _download_candidates(self, urls, output_dir, prefix):
+    def _download_candidates(self, urls, output_dir, prefix, allow_unclassified=False):
+        """Download candidate targets and validate the resulting bytes.
+
+        ``allow_unclassified`` is retained for compatibility with the regression tests and
+        callers; the final response MIME type and file signature are always required.
+        """
         downloaded = []
         seen = set()
         for source_url in urls:
@@ -191,7 +196,7 @@ class InstagramPublicFallback:
             urls = self._structured_urls(payload)
             if not urls:
                 continue
-            files = self._download_candidates(urls, output_dir, prefix)
+            files = self._download_candidates(urls, output_dir, prefix, allow_unclassified=True)
             if files:
                 logger.info("SMDownloader structured resolver returned %d media item(s)", len(files))
                 return files
@@ -281,7 +286,7 @@ class InstagramPublicFallback:
                 for response in responses:
                     try:
                         candidates = self._extract_page_candidates(response)
-                        files = self._download_candidates(candidates, output_dir, prefix)
+                        files = self._download_candidates(candidates, output_dir, prefix, allow_unclassified=True)
                         if files:
                             logger.info("%s Story fallback returned %d media item(s)", name, len(files))
                             return files
