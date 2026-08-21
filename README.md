@@ -66,7 +66,7 @@ Install Termux packages:
 
 ```bash
 pkg update && pkg upgrade
-pkg install python git ffmpeg
+pkg install python git ffmpeg curl
 ```
 
 Clone the repo:
@@ -98,15 +98,21 @@ The script creates `.venv`, installs `requirements-termux.txt`, checks FFmpeg, e
 
 ### One-command Termux update
 
-From the repo directory, use:
+From the repo directory, use **this command only**. Do not run `git pull` first:
 
 ```bash
-bash update-termux.sh
+cd ~/REAL-RIMERA-HATER-RADIO && curl -fsSL https://raw.githubusercontent.com/therealmangoosey/REAL-RIMERA-HATER-RADIO/main/update-termux.sh | bash
 ```
 
-That updater backs up `.env`, `config.json`, `cache.json`, and `instagram-cookies.txt`, syncs the working tree to the latest `origin/main`, restores those local files, updates Termux Python dependencies, compiles the bot to catch syntax errors, and starts it again.
+The updater backs up `.env`, `config.json`, `cache.json`, and `instagram-cookies.txt`, stashes other local changes, fetches the latest `main` directly from GitHub, resets the code to that version, restores your local configuration/runtime files, updates Termux Python dependencies, compile-checks the bot, and starts it again.
 
-**Do not use `git reset --hard origin/main` manually** if you need to preserve your local `.env` or `config.json`; use `bash update-termux.sh` instead.
+You can also run the checked-in updater directly after your checkout has been updated:
+
+```bash
+cd ~/REAL-RIMERA-HATER-RADIO && bash update-termux.sh
+```
+
+**Do not manually run `git reset --hard origin/main` if you need to preserve local configuration.** Use the updater.
 
 ### Keep Termux running
 
@@ -186,7 +192,7 @@ Termux safest update:
 
 ```bash
 cd ~/REAL-RIMERA-HATER-RADIO
-bash update-termux.sh
+curl -fsSL https://raw.githubusercontent.com/therealmangoosey/REAL-RIMERA-HATER-RADIO/main/update-termux.sh | bash
 ```
 
 Linux/macOS:
