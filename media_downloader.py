@@ -4,11 +4,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 import yt_dlp
 
 DISCORD_FREE_LIMIT = 20 * 1024 * 1024
+DISCORD_MAX_ATTACHMENTS = 10
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 
 
@@ -17,24 +19,29 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download public media URLs with yt-dlp and return local files."""
+    """Download public media URLs, including multi-item Instagram posts/stories."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
         self.max_bytes = max_bytes
+        self.cookies_file = os.getenv("YT_DLP_COOKIES_FILE")
 
     @staticmethod
     def extract_urls(text):
         return [url.rstrip(".,!?)]}") for url in URL_RE.findall(text or "")]
 
-    def download(self, url):
-        workdir = tempfile.mkdtemp(prefix="rimera-media-")
-        output_template = os.path.join(workdir, "%(id)s.%(ext)s")
+    @staticmethod
+    def _is_instagram(url):
+        return "instagram.com/" in url.lower() or "instagr.am/" in url.lower()
 
+    def _options(self, url, workdir):
+        # Instagram posts/stories can contain multiple media items. We only
+        # enable playlist extraction for Instagram so ordinary YouTube etc.
+        # links do not unexpectedly expand into an entire playlist.
         options = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
-            "outtmpl": output_template,
-            "noplaylist": True,
+            "outtmpl": os.path.join(workdir, "%(playlist_index|0)03d-%(id)s.%(ext)s"),
+            "noplaylist": not self._is_instagram(url),
             "quiet": True,
             "no_warnings": True,
             "restrictfilenames": True,
@@ -43,7 +50,17 @@ class MediaDownloader:
             "concurrent_fragment_downloads": 4,
             "socket_timeout": 15,
             "overwrites": True,
+            "ignoreerrors": True,
         }
+        # Optional browser/session cookies make public-to-the-bot Instagram
+        # Stories and login-gated posts work when the operator is authorized.
+        if self.cookies_file and os.path.isfile(self.cookies_file):
+            options["cookiefile"] = self.cookies_file
+        return options
+
+    def download(self, url):
+        workdir = tempfile.mkdtemp(prefix="rimera-media-")
+        options = self._options(url, workdir)
 
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
@@ -58,7 +75,7 @@ class MediaDownloader:
             if not files:
                 raise MediaDownloadError("The platform returned no downloadable media.")
 
-            files.sort(key=lambda path: os.path.getsize(path), reverse=True)
+            files.sort()
             return workdir, files, info
         except Exception as exc:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -95,6 +112,13 @@ class MediaDownloader:
                 return output
 
         return None
+
+    def create_zip(self, files, workdir):
+        zip_path = os.path.join(workdir, "rimera-media.zip")
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+            for path in files:
+                archive.write(path, arcname=os.path.basename(path))
+        return zip_path if os.path.getsize(zip_path) <= self.max_bytes else None
 
     @staticmethod
     def cleanup(workdir):
