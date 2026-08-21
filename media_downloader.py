@@ -1,4 +1,5 @@
 import glob
+import logging
 import os
 import re
 import shutil
@@ -76,7 +77,7 @@ class MediaDownloader:
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
-            # 1. Anonymous yt-dlp first.
+            # 1. Always try yt-dlp anonymously first.
             try:
                 info, files = self._extract(url, workdir, use_cookies=False)
                 if files:
@@ -86,16 +87,22 @@ class MediaDownloader:
             else:
                 anonymous_error = "yt-dlp returned no media"
 
-            # 2. Free anonymous public Story web fallback for Instagram Stories.
+            fallback_error = None
+
+            # 2. For Instagram Stories, try multiple free public web viewers.
             if self._is_instagram_story(url):
                 try:
                     files = self.instagram_fallback.fetch(url, workdir)
                     if files:
                         return workdir, files, {"source": "anonymous-web-fallback"}
-                except InstagramFallbackError:
-                    pass
+                except InstagramFallbackError as exc:
+                    fallback_error = str(exc)
+                    logging.getLogger("rimera-bot").warning(
+                        "Instagram anonymous fallback chain failed: %s",
+                        fallback_error,
+                    )
 
-            # 3. Optional authorized cookie fallback last.
+            # 3. Optional authorized cookies are a final fallback.
             if self.cookies_file:
                 try:
                     info, files = self._extract(url, workdir, use_cookies=True)
@@ -104,12 +111,17 @@ class MediaDownloader:
                 except Exception as cookie_error:
                     if self._is_instagram_story(url):
                         raise MediaDownloadError(
-                            f"Instagram Story could not be accessed anonymously or with the configured session: {cookie_error}"
+                            "Instagram Story could not be downloaded. "
+                            f"Anonymous yt-dlp: {anonymous_error}. "
+                            f"Public fallbacks: {fallback_error or 'none returned media'}. "
+                            f"Authenticated session: {cookie_error}"
                         ) from cookie_error
 
             if self._is_instagram_story(url):
                 raise MediaDownloadError(
-                    f"Instagram Story is not publicly accessible. Anonymous download failed: {anonymous_error}"
+                    "Instagram Story could not be downloaded. "
+                    f"Anonymous yt-dlp: {anonymous_error}. "
+                    f"Public fallbacks: {fallback_error or 'no fallback media returned'}."
                 )
             raise MediaDownloadError(f"No media was returned by yt-dlp: {anonymous_error}")
         except MediaDownloadError:
