@@ -40,7 +40,7 @@ class MediaDownloader:
         options = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
-            "outtmpl": os.path.join(workdir, "%(playlist_index|0)03d-%(id)s.%(ext)s"),
+            "outtmpl": os.path.join(workdir, "%(playlist_index)s-%(id)s.%(ext)s"),
             "noplaylist": not self._is_instagram(url),
             "quiet": True,
             "no_warnings": True,
