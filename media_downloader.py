@@ -12,6 +12,7 @@ import parth_dl
 import yt_dlp
 
 from instagram_fallback import InstagramFallbackError, InstagramPublicFallback
+from story_endpoint_fallback import StoryEndpointFallback
 
 DISCORD_FREE_LIMIT = 20_000_000
 DISCORD_SAFE_MARGIN = 4_096
@@ -32,6 +33,7 @@ class MediaDownloader:
         candidates = [configured, "instagram-cookies.txt", os.path.expanduser("~/instagram-cookies.txt")]
         self.cookies_file = next((path for path in candidates if path and os.path.isfile(path)), None)
         self.instagram_fallback = InstagramPublicFallback()
+        self.story_endpoint_fallback = StoryEndpointFallback()
 
     @staticmethod
     def extract_urls(text):
@@ -131,11 +133,26 @@ class MediaDownloader:
 
             if self._is_instagram_story(url):
                 try:
+                    # New endpoint-discovery path first. This talks to the public
+                    # Story downloader's own resolver instead of harvesting page images.
+                    files = self.story_endpoint_fallback.fetch(url, workdir)
+                    if files:
+                        logging.getLogger("rimera-bot").info(
+                            "JS/API Story fallback returned %d Instagram Story media item(s)", len(files)
+                        )
+                        return workdir, files, {"source": "anonymous-instagram-story-endpoint-fallback"}
+                except Exception as exc:
+                    fallback_error = f"endpoint fallback: {exc}"
+                    logging.getLogger("rimera-bot").warning(
+                        "Instagram Story endpoint fallback failed: %s", exc
+                    )
+
+                try:
                     files = self.instagram_fallback.fetch(url, workdir)
                     if files:
                         return workdir, files, {"source": "anonymous-instagram-story-fallback"}
                 except InstagramFallbackError as exc:
-                    fallback_error = str(exc)
+                    fallback_error = f"{fallback_error or 'endpoint fallback failed'}; page fallback: {exc}"
                     logging.getLogger("rimera-bot").warning(
                         "Instagram anonymous Story fallback chain failed: %s", fallback_error
                     )
