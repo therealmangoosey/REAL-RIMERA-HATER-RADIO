@@ -23,10 +23,10 @@ class InstagramPublicFallback:
 
     STRUCTURED_RESOLVER = "https://www.smdownloader.com/api/extract"
     STORY_SERVICES = (
-        ("DownloadIGStory", "https://downloadigstory.com", ("/{username}", "/?username={username}", "/?url={url}")),
-        ("StoriesDown", "https://storiesdown.dev", ("/{username}", "/?username={username}", "/?url={url}")),
-        ("PasteDL", "https://www.pastedl.com", ("/instagram/stories?username={username}", "/instagram/stories?url={url}")),
-        ("SocialDawn", "https://www.socialdawn.com", ("/instagram-story-downloader?username={username}", "/instagram-story-downloader?url={url}")),
+        ("PasteDL", "https://www.pastedl.com", ("/instagram/stories?url={raw_url}", "/instagram/stories?username={username}")),
+        ("DownloadIGStory", "https://downloadigstory.com", ("/?url={raw_url}", "/?username={username}")),
+        ("StoriesDown", "https://storiesdown.dev", ("/?url={raw_url}", "/?username={username}")),
+        ("SocialDawn", "https://www.socialdawn.com", ("/instagram-story-downloader?url={raw_url}", "/instagram-story-downloader?username={username}")),
     )
 
     MEDIA_EXTENSIONS = (".mp4", ".jpg", ".jpeg", ".png", ".webp", ".m4v", ".mov")
@@ -42,6 +42,12 @@ class InstagramPublicFallback:
     )
     MEDIA_PATH_HINTS = ("/download", "/media", "/file", "/video", "/photo", "/image", "/story", "/reel")
     ABSOLUTE_URL_RE = re.compile(r"https?://[^\"'<>\s]+", re.IGNORECASE)
+    STRUCTURED_MEDIA_KEYS = {
+        "media", "medias", "items", "results", "data", "downloads", "download",
+        "download_url", "downloadurl", "media_url", "mediaurl", "video_url", "videourl",
+        "image_url", "imageurl", "story_url", "storyurl", "file_url", "fileurl", "source",
+        "src", "href", "url", "video", "image", "photo", "story", "stories",
+    }
 
     def __init__(self, timeout=20):
         self.timeout = timeout
@@ -80,28 +86,39 @@ class InstagramPublicFallback:
         return bool(is_cdn and (has_ext or has_route) or (has_route and has_ext))
 
     @classmethod
-    def _extract_urls_from_json(cls, payload):
+    def _structured_urls(cls, payload):
+        """Extract candidate download URLs from resolver JSON while preserving key context."""
         found = []
 
-        def walk(value):
+        def walk(value, key_hint=""):
+            normalized_hint = str(key_hint or "").lower().replace("-", "_")
+            media_context = normalized_hint in cls.STRUCTURED_MEDIA_KEYS or any(
+                token in normalized_hint for token in ("download", "media", "video", "image", "photo", "story", "file", "source")
+            )
             if isinstance(value, dict):
-                for child in value.values():
-                    walk(child)
+                for key, child in value.items():
+                    walk(child, key)
             elif isinstance(value, list):
                 for child in value:
-                    walk(child)
+                    walk(child, key_hint)
             elif isinstance(value, str):
-                cleaned = html.unescape(value).replace("\\/", "/").replace("\\u0026", "&")
-                for match in cls.ABSOLUTE_URL_RE.findall(cleaned):
-                    if cls._looks_like_media_url(match):
+                cleaned = html.unescape(value).replace("\\/", "/").replace("\\u0026", "&").strip()
+                matches = cls.ABSOLUTE_URL_RE.findall(cleaned)
+                for match in matches:
+                    if media_context or cls._looks_like_media_url(match):
                         found.append(match)
-                if cls._looks_like_media_url(cleaned):
+                if media_context and cleaned.startswith(("http://", "https://")):
                     found.append(cleaned)
 
         walk(payload)
         return list(dict.fromkeys(found))
 
-    def _download_candidates(self, urls, output_dir, prefix):
+    # Backwards-compatible test/helper name.
+    @classmethod
+    def _extract_urls_from_json(cls, payload):
+        return [url for url in cls._structured_urls(payload) if cls._looks_like_media_url(url)]
+
+    def _download_candidates(self, urls, output_dir, prefix, allow_unclassified=False):
         downloaded = []
         seen = set()
         for source_url in urls:
@@ -113,7 +130,8 @@ class InstagramPublicFallback:
                 response.raise_for_status()
                 content_type = (response.headers.get("content-type") or "").lower().split(";", 1)[0].strip()
                 ext = {
-                    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4"
+                    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4",
+                    "video/quicktime": ".mov", "video/x-m4v": ".m4v",
                 }.get(content_type)
                 if not ext:
                     response.close()
@@ -148,7 +166,7 @@ class InstagramPublicFallback:
             return head.startswith(b"\x89PNG\r\n\x1a\n")
         if content_type == "image/webp":
             return head.startswith(b"RIFF") and b"WEBP" in head[:16]
-        if content_type == "video/mp4":
+        if content_type in {"video/mp4", "video/quicktime", "video/x-m4v"}:
             return len(head) >= 8 and head[4:8] == b"ftyp"
         return False
 
@@ -177,10 +195,10 @@ class InstagramPublicFallback:
                 payload = response.json()
             except (requests.RequestException, ValueError):
                 continue
-            urls = self._extract_urls_from_json(payload)
+            urls = self._structured_urls(payload)
             if not urls:
                 continue
-            files = self._download_candidates(urls, output_dir, prefix)
+            files = self._download_candidates(urls, output_dir, prefix, allow_unclassified=True)
             if files:
                 logger.info("SMDownloader structured resolver returned %d media item(s)", len(files))
                 return files
@@ -191,12 +209,12 @@ class InstagramPublicFallback:
             base + pattern.format(
                 username=quote_plus(username or ""),
                 url=quote_plus(instagram_url),
+                raw_url=instagram_url,
             )
             for pattern in patterns
         ]
 
     def _page_fallback(self, instagram_url, output_dir, prefix):
-        """Last-resort Story page fallback. Only explicit download/media links are used."""
         username = self.username_from_url(instagram_url)
         for name, base, patterns in self.STORY_SERVICES:
             for page_url in self._visit_variants(base, patterns, username, instagram_url):
@@ -208,12 +226,15 @@ class InstagramPublicFallback:
                     links = []
                     for tag in soup.find_all("a", href=True):
                         label = " ".join(tag.stripped_strings).lower()
-                        if not any(word in label for word in ("download", "save media", "download media", "original")):
-                            continue
                         href = urljoin(page.url, html.unescape(tag["href"]))
-                        if self._looks_like_media_url(href):
+                        if any(word in label for word in ("download", "save media", "download media", "original")):
                             links.append(href)
-                    files = self._download_candidates(links, output_dir, prefix)
+                    for tag in soup.find_all(True):
+                        for attr in ("data-download", "data-media", "data-video", "data-image", "data-file"):
+                            href = tag.get(attr)
+                            if href:
+                                links.append(urljoin(page.url, html.unescape(href)))
+                    files = self._download_candidates(list(dict.fromkeys(links)), output_dir, prefix, allow_unclassified=True)
                     if files:
                         logger.info("%s page fallback returned %d media item(s)", name, len(files))
                         return files
