@@ -11,11 +11,7 @@ logger = logging.getLogger("rimera-bot.story-endpoint-fallback")
 
 
 class StoryEndpointFallback:
-    """Lightweight, no-browser Story resolver.
-
-    Discovers the public search/extract endpoints used by Story downloader pages,
-    calls several likely request shapes, and only accepts real media responses.
-    """
+    """Lightweight, no-browser Story resolver."""
 
     PROVIDERS = (
         ("DownloadIGStory", "https://downloadigstory.com/"),
@@ -64,7 +60,7 @@ class StoryEndpointFallback:
         value = html.unescape(value).replace("\\/", "/").strip()
         parsed = urlparse(value)
         path = parsed.path.lower().rstrip("/")
-        if not path or path == "":
+        if not path:
             return False
         if any(bad in path for bad in ("/logo", "/icon", "/favicon", "/screenshot", "/assets/", "/static/", "/css/", "/js/")):
             return False
@@ -85,9 +81,10 @@ class StoryEndpointFallback:
             parsed = urlparse(candidate)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return
-            # A provider can return its media host as an explicit field before
-            # returning the actual file path. Never treat the bare origin as media.
-            if parsed.path.rstrip("/") == "":
+            path = parsed.path.rstrip("/")
+            # Explicit media fields can contain a provider origin as well as the
+            # actual media URL. A bare origin is never a downloadable media item.
+            if not path:
                 return
             found.append(candidate)
 
