@@ -14,7 +14,7 @@ import yt_dlp
 from instagram_fallback import InstagramFallbackError, InstagramPublicFallback
 
 DISCORD_FREE_LIMIT = 20_000_000
-DISCORD_SAFE_MARGIN = 100_000
+DISCORD_SAFE_MARGIN = 4_096
 DISCORD_MAX_ATTACHMENTS = 10
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 
@@ -200,12 +200,9 @@ class MediaDownloader:
         usable_bits = max(64_000, (target_bytes - 24_000) * 8)
         total_kbps = max(180, int(usable_bits / duration / 1000))
         video_kbps = max(80, total_kbps - audio_kbps)
-
-        # Iteratively approach the largest safe size. Encoding overhead makes
-        # exact byte equality impractical, so the target is the closest safe
-        # size below Discord's limit rather than a risky one-byte-over upload.
         bitrate = video_kbps
         best = None
+
         for attempt in range(7):
             candidate = f"{Path(path).stem}-discord-{attempt}.mp4"
             command = [
@@ -221,6 +218,7 @@ class MediaDownloader:
             if not os.path.exists(candidate):
                 bitrate *= 0.75
                 continue
+
             size = os.path.getsize(candidate)
             if size <= target_bytes:
                 if best and best != candidate:
@@ -229,7 +227,7 @@ class MediaDownloader:
                     except OSError:
                         pass
                 best = candidate
-                if target_bytes - size <= 32_768:
+                if target_bytes - size <= 4_096:
                     break
                 bitrate *= min(1.08, target_bytes / max(size, 1))
             else:
@@ -250,10 +248,10 @@ class MediaDownloader:
             return None
         output = f"{Path(path).stem}-discord.jpg"
         original = os.path.getsize(path)
-        # Start high-quality and progressively reduce JPEG quality/resolution.
         quality = 95
         scale = 1.0
         best = None
+
         for attempt in range(9):
             candidate = f"{Path(path).stem}-discord-{attempt}.jpg"
             filters = []
@@ -268,6 +266,7 @@ class MediaDownloader:
             if not os.path.exists(candidate):
                 quality -= 7
                 continue
+
             size = os.path.getsize(candidate)
             if size <= target_bytes:
                 if best and best != candidate:
@@ -276,7 +275,7 @@ class MediaDownloader:
                     except OSError:
                         pass
                 best = candidate
-                if target_bytes - size <= 32_768:
+                if target_bytes - size <= 4_096:
                     break
                 if original > target_bytes and scale > 0.7:
                     scale *= 0.97
