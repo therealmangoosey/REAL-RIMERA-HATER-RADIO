@@ -63,7 +63,9 @@ class StoryEndpointFallback:
             return False
         value = html.unescape(value).replace("\\/", "/").strip()
         parsed = urlparse(value)
-        path = parsed.path.lower()
+        path = parsed.path.lower().rstrip("/")
+        if not path or path == "":
+            return False
         if any(bad in path for bad in ("/logo", "/icon", "/favicon", "/screenshot", "/assets/", "/static/", "/css/", "/js/")):
             return False
         host = (parsed.hostname or "").lower()
@@ -75,6 +77,17 @@ class StoryEndpointFallback:
     @classmethod
     def _collect_media_urls(cls, value):
         found = []
+
+        def add_candidate(candidate):
+            if not isinstance(candidate, str):
+                return
+            candidate = html.unescape(candidate).replace("\\/", "/").strip()
+            parsed = urlparse(candidate)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return
+            if parsed.path.rstrip("/") == "":
+                return
+            found.append(candidate)
 
         def walk(obj, key_hint=""):
             key = str(key_hint).lower()
@@ -89,9 +102,9 @@ class StoryEndpointFallback:
                 text = html.unescape(obj).replace("\\/", "/")
                 for candidate in cls.ABS_URL.findall(text):
                     if media_context or cls._is_media_url(candidate):
-                        found.append(candidate)
+                        add_candidate(candidate)
                 if media_context and text.startswith(("http://", "https://")):
-                    found.append(text)
+                    add_candidate(text)
 
         walk(value)
         return list(dict.fromkeys(found))
@@ -199,7 +212,6 @@ class StoryEndpointFallback:
                 continue
 
             endpoints = self._script_endpoints(page)
-            # Also try HTML form actions as cheap endpoint discovery.
             for action in re.findall(r"<form[^>]+action=[\"']([^\"']+)", page.text, re.I):
                 endpoints.append(urljoin(page.url, html.unescape(action)))
             endpoints = list(dict.fromkeys(endpoints))
