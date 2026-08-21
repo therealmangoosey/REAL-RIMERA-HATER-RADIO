@@ -18,11 +18,19 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download public media URLs, including multi-item Instagram posts/stories."""
+    """Download media URLs, including multi-item Instagram posts/stories."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
-        self.max_bytes = max_bytes
-        self.cookies_file = os.getenv("YT_DLP_COOKIES_FILE")
+        configured = os.getenv("YT_DLP_COOKIES_FILE", "").strip()
+        candidates = [
+            configured,
+            "instagram-cookies.txt",
+            os.path.expanduser("~/instagram-cookies.txt"),
+        ]
+        self.cookies_file = next(
+            (path for path in candidates if path and os.path.isfile(path)),
+            None,
+        )
 
     @staticmethod
     def extract_urls(text):
@@ -32,27 +40,30 @@ class MediaDownloader:
     def _is_instagram(url):
         return "instagram.com/" in url.lower() or "instagr.am/" in url.lower()
 
+    @staticmethod
+    def _is_instagram_story(url):
+        return "/stories/" in url.lower()
+
     def _options(self, url, workdir):
-        # Instagram URLs may expand to multiple media entries (carousels/stories).
-        # Other platforms stay single-item unless their extractor returns a single
-        # media entry itself.
+        is_instagram = self._is_instagram(url)
         options = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
             "outtmpl": os.path.join(workdir, "%(playlist_index|0)03d-%(id)s.%(ext)s"),
-            "noplaylist": not self._is_instagram(url),
+            "noplaylist": not is_instagram,
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
             "restrictfilenames": True,
             "retries": 2,
             "fragment_retries": 2,
             "concurrent_fragment_downloads": 4,
             "socket_timeout": 15,
             "overwrites": True,
-            "ignoreerrors": True,
+            "ignoreerrors": False,
         }
-        # Optional cookies allow authorized access to login-gated Instagram media.
-        if self.cookies_file and os.path.isfile(self.cookies_file):
+        # Instagram Stories and private Instagram posts require an authenticated
+        # session. The file must be a Mozilla/Netscape cookies.txt file.
+        if self.cookies_file:
             options["cookiefile"] = self.cookies_file
         return options
 
@@ -64,6 +75,11 @@ class MediaDownloader:
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if not info:
+                    if self._is_instagram_story(url) and not self.cookies_file:
+                        raise MediaDownloadError(
+                            "Instagram Story requires an authenticated cookies.txt file. "
+                            "Set YT_DLP_COOKIES_FILE or place instagram-cookies.txt beside the bot."
+                        )
                     raise MediaDownloadError("No media was returned by yt-dlp.")
 
             files = [
@@ -79,7 +95,13 @@ class MediaDownloader:
             shutil.rmtree(workdir, ignore_errors=True)
             if isinstance(exc, MediaDownloadError):
                 raise
-            raise MediaDownloadError(str(exc)) from exc
+            message = str(exc)
+            if self._is_instagram_story(url) and not self.cookies_file and "log in" in message.lower():
+                message = (
+                    "Instagram requires login for this Story. Add an authenticated Mozilla/Netscape "
+                    "cookies.txt file as instagram-cookies.txt or set YT_DLP_COOKIES_FILE."
+                )
+            raise MediaDownloadError(message) from exc
 
     def fit_for_discord(self, path):
         if os.path.getsize(path) <= self.max_bytes:
