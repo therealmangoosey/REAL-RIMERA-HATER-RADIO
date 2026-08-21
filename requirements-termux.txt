@@ -1,0 +1,7 @@
+discord.py
+beautifulsoup4
+requests
+flask
+lxml
+python-dotenv
+yt-dlp>=2026.7.4,<2026.8
