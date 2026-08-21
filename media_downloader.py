@@ -13,7 +13,8 @@ import yt_dlp
 
 from instagram_fallback import InstagramFallbackError, InstagramPublicFallback
 
-DISCORD_FREE_LIMIT = 20 * 1024 * 1024
+DISCORD_FREE_LIMIT = 20_000_000
+DISCORD_SAFE_MARGIN = 100_000
 DISCORD_MAX_ATTACHMENTS = 10
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 
@@ -23,7 +24,7 @@ class MediaDownloadError(Exception):
 
 
 class MediaDownloader:
-    """Download public media with platform-specific, validated fallbacks."""
+    """Download public media with validated fallbacks and Discord-safe compression."""
 
     def __init__(self, max_bytes=DISCORD_FREE_LIMIT):
         self.max_bytes = max_bytes
@@ -85,7 +86,6 @@ class MediaDownloader:
         return info, self._files(workdir)
 
     def _parth_dl_fallback(self, url, workdir):
-        """Use parth-dl for public Instagram posts, reels and carousels."""
         try:
             result = parth_dl.download(
                 url,
@@ -167,24 +167,146 @@ class MediaDownloader:
             shutil.rmtree(workdir, ignore_errors=True)
             raise MediaDownloadError(str(exc)) from exc
 
-    def fit_for_discord(self, path):
-        if os.path.getsize(path) <= self.max_bytes:
-            return path
+    @staticmethod
+    def _safe_target(max_bytes):
+        return max(1, int(max_bytes) - DISCORD_SAFE_MARGIN)
+
+    @staticmethod
+    def _video_duration(path):
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            return 0.0
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        try:
+            return max(0.0, float(result.stdout.strip()))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _compress_video(self, path, target_bytes):
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             return None
-        suffix = Path(path).suffix.lower()
-        if suffix in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}:
-            output = f"{Path(path).stem}-discord.mp4"
+        duration = self._video_duration(path)
+        if duration <= 0:
+            return None
+
+        output = f"{Path(path).stem}-discord.mp4"
+        audio_kbps = 96
+        usable_bits = max(64_000, (target_bytes - 24_000) * 8)
+        total_kbps = max(180, int(usable_bits / duration / 1000))
+        video_kbps = max(80, total_kbps - audio_kbps)
+
+        # Iteratively approach the largest safe size. Encoding overhead makes
+        # exact byte equality impractical, so the target is the closest safe
+        # size below Discord's limit rather than a risky one-byte-over upload.
+        bitrate = video_kbps
+        best = None
+        for attempt in range(7):
+            candidate = f"{Path(path).stem}-discord-{attempt}.mp4"
             command = [
                 ffmpeg, "-y", "-i", path,
-                "-vf", "scale='min(1280,iw)':-2",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", output,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "slow",
+                "-b:v", f"{int(bitrate)}k", "-maxrate", f"{int(bitrate)}k",
+                "-bufsize", f"{int(max(2 * bitrate, 320))}k",
+                "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+                "-movflags", "+faststart", candidate,
             ]
             subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            if os.path.exists(output) and os.path.getsize(output) <= self.max_bytes:
-                return output
+            if not os.path.exists(candidate):
+                bitrate *= 0.75
+                continue
+            size = os.path.getsize(candidate)
+            if size <= target_bytes:
+                if best and best != candidate:
+                    try:
+                        os.remove(best)
+                    except OSError:
+                        pass
+                best = candidate
+                if target_bytes - size <= 32_768:
+                    break
+                bitrate *= min(1.08, target_bytes / max(size, 1))
+            else:
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    pass
+                bitrate *= max(0.55, (target_bytes / size) * 0.97)
+
+        if best:
+            os.replace(best, output)
+            return output
+        return None
+
+    def _compress_image(self, path, target_bytes):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        output = f"{Path(path).stem}-discord.jpg"
+        original = os.path.getsize(path)
+        # Start high-quality and progressively reduce JPEG quality/resolution.
+        quality = 95
+        scale = 1.0
+        best = None
+        for attempt in range(9):
+            candidate = f"{Path(path).stem}-discord-{attempt}.jpg"
+            filters = []
+            if scale < 0.999:
+                filters.append(f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2")
+            vf = ["-vf", ",".join(filters)] if filters else []
+            command = [
+                ffmpeg, "-y", "-i", path, *vf,
+                "-frames:v", "1", "-c:v", "mjpeg", "-q:v", str(max(2, quality)), candidate,
+            ]
+            subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if not os.path.exists(candidate):
+                quality -= 7
+                continue
+            size = os.path.getsize(candidate)
+            if size <= target_bytes:
+                if best and best != candidate:
+                    try:
+                        os.remove(best)
+                    except OSError:
+                        pass
+                best = candidate
+                if target_bytes - size <= 32_768:
+                    break
+                if original > target_bytes and scale > 0.7:
+                    scale *= 0.97
+                else:
+                    quality -= 2
+            else:
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    pass
+                quality = max(45, quality - 8)
+                scale *= 0.94
+
+        if best:
+            os.replace(best, output)
+            return output
+        return None
+
+    def fit_for_discord(self, path, max_bytes=None):
+        """Return original or the highest-quality version that safely fits max_bytes."""
+        limit = int(max_bytes or self.max_bytes)
+        if os.path.getsize(path) <= limit:
+            return path
+
+        target = self._safe_target(limit)
+        suffix = Path(path).suffix.lower()
+        if suffix in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}:
+            return self._compress_video(path, target)
+        if suffix in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+            return self._compress_image(path, target)
         return None
 
     @staticmethod
