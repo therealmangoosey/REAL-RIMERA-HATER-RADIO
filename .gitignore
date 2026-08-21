@@ -3,3 +3,5 @@ bot.log
 cache.json
 __pycache__/
 *.pyc
+instagram-cookies.txt
+*instagram*cookies*.txt
