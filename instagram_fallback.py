@@ -1,5 +1,4 @@
 import html
-import json
 import logging
 import os
 import re
@@ -16,17 +15,14 @@ class InstagramFallbackError(Exception):
 
 
 class InstagramPublicFallback:
-    """Anonymous Instagram fallback.
-
-    Uses a structured public resolver first; webpage scraping is only a last resort for Stories.
-    """
+    """Anonymous Instagram fallback with a dedicated Story resolver path."""
 
     STRUCTURED_RESOLVER = "https://www.smdownloader.com/api/extract"
     STORY_SERVICES = (
-        ("PasteDL", "https://www.pastedl.com", ("/instagram/stories?url={raw_url}", "/instagram/stories?username={username}")),
-        ("DownloadIGStory", "https://downloadigstory.com", ("/?url={raw_url}", "/?username={username}")),
-        ("StoriesDown", "https://storiesdown.dev", ("/?url={raw_url}", "/?username={username}")),
-        ("SocialDawn", "https://www.socialdawn.com", ("/instagram-story-downloader?url={raw_url}", "/instagram-story-downloader?username={username}")),
+        ("PasteDL", "https://www.pastedl.com", ("/instagram/stories", "/instagram/story")),
+        ("DownloadIGStory", "https://downloadigstory.com", ("/",)),
+        ("StoriesDown", "https://storiesdown.dev", ("/",)),
+        ("SocialDawn", "https://www.socialdawn.com", ("/instagram-story-downloader",)),
     )
 
     MEDIA_EXTENSIONS = (".mp4", ".jpg", ".jpeg", ".png", ".webp", ".m4v", ".mov")
@@ -83,11 +79,10 @@ class InstagramPublicFallback:
         is_cdn = any(hint in hostname for hint in cls.CDN_HOST_HINTS) or hostname.endswith(("fbcdn.net", "cdninstagram.com"))
         has_ext = any(path.endswith(ext) for ext in cls.MEDIA_EXTENSIONS)
         has_route = any(token in path for token in cls.MEDIA_PATH_HINTS)
-        return bool(is_cdn and (has_ext or has_route) or (has_route and has_ext))
+        return bool((is_cdn and (has_ext or has_route)) or (has_route and has_ext))
 
     @classmethod
     def _structured_urls(cls, payload):
-        """Extract candidate download URLs from resolver JSON while preserving key context."""
         found = []
 
         def walk(value, key_hint=""):
@@ -113,12 +108,11 @@ class InstagramPublicFallback:
         walk(payload)
         return list(dict.fromkeys(found))
 
-    # Backwards-compatible test/helper name.
     @classmethod
     def _extract_urls_from_json(cls, payload):
         return [url for url in cls._structured_urls(payload) if cls._looks_like_media_url(url)]
 
-    def _download_candidates(self, urls, output_dir, prefix, allow_unclassified=False):
+    def _download_candidates(self, urls, output_dir, prefix):
         downloaded = []
         seen = set()
         for source_url in urls:
@@ -170,25 +164,24 @@ class InstagramPublicFallback:
             return len(head) >= 8 and head[4:8] == b"ftyp"
         return False
 
-    def _structured_extract(self, instagram_url, output_dir, prefix):
+    def _structured_extract(self, instagram_url, output_dir, prefix, username=None):
         responses = []
-        try:
-            responses.append(self.session.post(
-                self.STRUCTURED_RESOLVER,
-                json={"url": instagram_url},
-                timeout=self.timeout,
-            ))
-        except requests.RequestException:
-            pass
-        try:
-            responses.append(self.session.get(
-                self.STRUCTURED_RESOLVER,
-                params={"url": instagram_url},
-                timeout=self.timeout,
-            ))
-        except requests.RequestException:
-            pass
-
+        payloads = [{"url": instagram_url}, {"instagram_url": instagram_url}]
+        if username:
+            payloads.append({"username": username})
+        for payload in payloads:
+            try:
+                responses.append(self.session.post(self.STRUCTURED_RESOLVER, json=payload, timeout=self.timeout))
+            except requests.RequestException:
+                pass
+        params_list = [{"url": instagram_url}, {"instagram_url": instagram_url}]
+        if username:
+            params_list.append({"username": username})
+        for params in params_list:
+            try:
+                responses.append(self.session.get(self.STRUCTURED_RESOLVER, params=params, timeout=self.timeout))
+            except requests.RequestException:
+                pass
         for response in responses:
             try:
                 response.raise_for_status()
@@ -198,56 +191,112 @@ class InstagramPublicFallback:
             urls = self._structured_urls(payload)
             if not urls:
                 continue
-            files = self._download_candidates(urls, output_dir, prefix, allow_unclassified=True)
+            files = self._download_candidates(urls, output_dir, prefix)
             if files:
                 logger.info("SMDownloader structured resolver returned %d media item(s)", len(files))
                 return files
         return []
 
-    def _visit_variants(self, base, patterns, username, instagram_url):
-        return [
-            base + pattern.format(
-                username=quote_plus(username or ""),
-                url=quote_plus(instagram_url),
-                raw_url=instagram_url,
-            )
-            for pattern in patterns
-        ]
+    @staticmethod
+    def _form_fields(form, username, instagram_url):
+        fields = {}
+        for control in form.find_all(["input", "textarea"]):
+            name = control.get("name")
+            if not name:
+                continue
+            input_type = (control.get("type") or "text").lower()
+            if input_type in {"submit", "button", "reset", "file"}:
+                continue
+            fields[name] = control.get("value", "")
+            hint = " ".join([
+                name.lower(),
+                (control.get("placeholder") or "").lower(),
+                (control.get("aria-label") or "").lower(),
+            ])
+            if any(token in hint for token in ("username", "handle", "user", "profile")):
+                fields[name] = username or ""
+            elif any(token in hint for token in ("story", "url", "link")):
+                fields[name] = instagram_url
+        return fields
+
+    def _extract_page_candidates(self, page):
+        soup = BeautifulSoup(page.text, "lxml")
+        candidates = []
+        for tag in soup.find_all(["video", "source", "audio"]):
+            for attr in ("src", "data-src", "data-download", "data-media", "data-video", "data-file"):
+                value = tag.get(attr)
+                if value:
+                    candidates.append(urljoin(page.url, html.unescape(value)))
+        for tag in soup.find_all(True):
+            for attr in ("data-download", "data-media", "data-video", "data-image", "data-file"):
+                value = tag.get(attr)
+                if value:
+                    candidates.append(urljoin(page.url, html.unescape(value)))
+        for tag in soup.find_all("a", href=True):
+            label = " ".join(tag.stripped_strings).lower()
+            if any(word in label for word in ("download", "save media", "download media", "original")):
+                candidates.append(urljoin(page.url, html.unescape(tag["href"])))
+        for script in soup.find_all("script"):
+            text = script.string or script.get_text(" ")
+            for value in self.ABSOLUTE_URL_RE.findall(text):
+                if self._looks_like_media_url(value):
+                    candidates.append(value)
+        return list(dict.fromkeys(candidates))
 
     def _page_fallback(self, instagram_url, output_dir, prefix):
         username = self.username_from_url(instagram_url)
-        for name, base, patterns in self.STORY_SERVICES:
-            for page_url in self._visit_variants(base, patterns, username, instagram_url):
+        if not username:
+            return []
+        for name, base, paths in self.STORY_SERVICES:
+            for path in paths:
+                page_url = urljoin(base, path)
+                responses = []
                 try:
                     page = self.session.get(page_url, timeout=self.timeout, allow_redirects=True)
-                    if page.status_code >= 400:
-                        continue
-                    soup = BeautifulSoup(page.text, "lxml")
-                    links = []
-                    for tag in soup.find_all("a", href=True):
-                        label = " ".join(tag.stripped_strings).lower()
-                        href = urljoin(page.url, html.unescape(tag["href"]))
-                        if any(word in label for word in ("download", "save media", "download media", "original")):
-                            links.append(href)
-                    for tag in soup.find_all(True):
-                        for attr in ("data-download", "data-media", "data-video", "data-image", "data-file"):
-                            href = tag.get(attr)
-                            if href:
-                                links.append(urljoin(page.url, html.unescape(href)))
-                    files = self._download_candidates(list(dict.fromkeys(links)), output_dir, prefix, allow_unclassified=True)
-                    if files:
-                        logger.info("%s page fallback returned %d media item(s)", name, len(files))
-                        return files
+                    if page.status_code < 400:
+                        responses.append(page)
+                        soup = BeautifulSoup(page.text, "lxml")
+                        for form in soup.find_all("form"):
+                            action = urljoin(page.url, form.get("action") or page.url)
+                            method = (form.get("method") or "get").lower()
+                            fields = self._form_fields(form, username, instagram_url)
+                            if not fields:
+                                continue
+                            try:
+                                if method == "post":
+                                    responses.append(self.session.post(action, data=fields, timeout=self.timeout, allow_redirects=True))
+                                else:
+                                    responses.append(self.session.get(action, params=fields, timeout=self.timeout, allow_redirects=True))
+                            except requests.RequestException:
+                                continue
                 except requests.RequestException:
                     continue
+                for params in ({"username": username}, {"url": instagram_url}, {"story_url": instagram_url}):
+                    try:
+                        response = self.session.get(page_url, params=params, timeout=self.timeout, allow_redirects=True)
+                        if response.status_code < 400:
+                            responses.append(response)
+                    except requests.RequestException:
+                        continue
+                for response in responses:
+                    try:
+                        candidates = self._extract_page_candidates(response)
+                        files = self._download_candidates(candidates, output_dir, prefix)
+                        if files:
+                            logger.info("%s Story fallback returned %d media item(s)", name, len(files))
+                            return files
+                    except Exception:
+                        logger.debug("%s Story fallback parse failed", name, exc_info=True)
         return []
 
     def fetch(self, instagram_url, output_dir):
-        prefix = "instagram-story" if "/stories/" in instagram_url.lower() else "instagram-post"
-        files = self._structured_extract(instagram_url, output_dir, prefix)
+        is_story = "/stories/" in instagram_url.lower()
+        prefix = "instagram-story" if is_story else "instagram-post"
+        username = self.username_from_url(instagram_url) if is_story else None
+        files = self._structured_extract(instagram_url, output_dir, prefix, username=username)
         if files:
             return files
-        if "/stories/" in instagram_url.lower():
+        if is_story:
             files = self._page_fallback(instagram_url, output_dir, prefix)
             if files:
                 return files
