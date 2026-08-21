@@ -1,7 +1,7 @@
 import os
 import unittest
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from instagram_fallback import InstagramPublicFallback
 from media_downloader import MediaDownloader
@@ -24,6 +24,31 @@ class TestMediaDownloader(unittest.TestCase):
         self.assertTrue(downloader._instagram_post_or_reel("https://www.instagram.com/reel/ABC/"))
         self.assertFalse(downloader._instagram_post_or_reel("https://www.tiktok.com/@user/video/123"))
 
+    @patch("media_downloader.parth_dl.download")
+    def test_parth_dl_fallback_returns_carousel_files(self, mock_download):
+        with TemporaryDirectory() as temp_dir:
+            first = os.path.join(temp_dir, "slide_01.jpg")
+            second = os.path.join(temp_dir, "slide_02.jpg")
+            with open(first, "wb") as handle:
+                handle.write(b"x" * 5000)
+            with open(second, "wb") as handle:
+                handle.write(b"y" * 5000)
+            mock_download.return_value = [first, second]
+
+            downloader = MediaDownloader()
+            result = downloader._parth_dl_fallback(
+                "https://www.instagram.com/p/DbG-2cqkU3F/",
+                temp_dir,
+            )
+
+            self.assertEqual(result, [first, second])
+            mock_download.assert_called_once_with(
+                "https://www.instagram.com/p/DbG-2cqkU3F/",
+                output_path=temp_dir,
+                quality="best",
+                verbose=False,
+            )
+
 
 class TestInstagramFallback(unittest.TestCase):
     def test_service_page_image_is_not_treated_as_media_url(self):
@@ -32,12 +57,38 @@ class TestInstagramFallback(unittest.TestCase):
                 "https://www.instaloadr.com/static/assets/download-button.png"
             )
         )
+        self.assertFalse(
+            InstagramPublicFallback._looks_like_media_url(
+                "https://play.google.com/store/apps/details?id=example"
+            )
+        )
+        self.assertFalse(
+            InstagramPublicFallback._looks_like_media_url(
+                "https://www.instagram.com/static/images/Instagram-icon.png"
+            )
+        )
 
     def test_cdn_media_url_is_accepted(self):
         self.assertTrue(
             InstagramPublicFallback._looks_like_media_url(
                 "https://scontent.cdninstagram.com/v/t51.2885-15/123.jpg"
             )
+        )
+
+    def test_structured_resolver_extracts_media_urls_from_json(self):
+        payload = {
+            "media": [
+                {"download_url": "https://scontent.cdninstagram.com/v/t51.2885-15/123.jpg"},
+                {"url": "https://scontent.cdninstagram.com/v/t51.2885-15/456.mp4"},
+            ]
+        }
+        urls = InstagramPublicFallback._extract_urls_from_json(payload)
+        self.assertEqual(
+            urls,
+            [
+                "https://scontent.cdninstagram.com/v/t51.2885-15/123.jpg",
+                "https://scontent.cdninstagram.com/v/t51.2885-15/456.mp4",
+            ],
         )
 
     def test_download_candidates_rejects_html(self):
