@@ -1,8 +1,8 @@
 import html
-import json
 import logging
 import os
 import re
+import time
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -33,8 +33,9 @@ class StoryEndpointFallback:
         "video/x-m4v": ".m4v",
     }
 
-    def __init__(self, timeout=20):
+    def __init__(self, timeout=20, max_total_time=45):
         self.timeout = timeout
+        self.max_total_time = max_total_time
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
@@ -156,12 +157,15 @@ class StoryEndpointFallback:
                 continue
         return files
 
-    def _script_endpoints(self, page):
+    def _script_endpoints(self, page, deadline):
         endpoints = set()
         for src in re.findall(r"<script[^>]+src=[\"']([^\"']+)", page.text, re.I):
+            if time.monotonic() >= deadline:
+                break
             script_url = urljoin(page.url, html.unescape(src))
             try:
-                script = self.session.get(script_url, timeout=self.timeout)
+                remaining = max(1, deadline - time.monotonic())
+                script = self.session.get(script_url, timeout=min(self.timeout, remaining))
             except requests.RequestException:
                 continue
             if script.status_code >= 400:
@@ -173,26 +177,44 @@ class StoryEndpointFallback:
                     endpoints.add(absolute)
         return list(endpoints)[:20]
 
-    def _request_variants(self, endpoint, username, story_url, story_id):
+    def _request_variants(self, endpoint, story_url, story_id, deadline):
+        # Never query a bare username here. That asks generic Instagram
+        # downloaders for the user's posts and is how a Story URL can turn
+        # into a carousel of unrelated profile posts.
         payloads = [
-            {"url": story_url}, {"instagram_url": story_url}, {"story_url": story_url},
-            {"username": username}, {"handle": username}, {"user": username},
-            {"url": story_url, "username": username},
-            {"username": username, "story_id": story_id},
-            {"story_id": story_id, "url": story_url},
+            {"url": story_url},
+            {"instagram_url": story_url},
+            {"story_url": story_url},
         ]
+        if story_id:
+            payloads.extend([
+                {"story_id": story_id, "url": story_url},
+                {"story_id": story_id},
+            ])
         responses = []
         for payload in payloads:
+            if time.monotonic() >= deadline:
+                break
+            remaining = max(1, deadline - time.monotonic())
+            request_timeout = min(self.timeout, remaining)
             try:
-                responses.append(self.session.post(endpoint, json=payload, timeout=self.timeout))
+                responses.append(self.session.post(endpoint, json=payload, timeout=request_timeout))
             except requests.RequestException:
                 pass
+            if time.monotonic() >= deadline:
+                break
+            remaining = max(1, deadline - time.monotonic())
+            request_timeout = min(self.timeout, remaining)
             try:
-                responses.append(self.session.post(endpoint, data=payload, timeout=self.timeout))
+                responses.append(self.session.post(endpoint, data=payload, timeout=request_timeout))
             except requests.RequestException:
                 pass
+            if time.monotonic() >= deadline:
+                break
+            remaining = max(1, deadline - time.monotonic())
+            request_timeout = min(self.timeout, remaining)
             try:
-                responses.append(self.session.get(endpoint, params=payload, timeout=self.timeout))
+                responses.append(self.session.get(endpoint, params=payload, timeout=request_timeout))
             except requests.RequestException:
                 pass
         return responses
@@ -202,21 +224,29 @@ class StoryEndpointFallback:
         if not username:
             return []
         story_id = self._story_id(story_url)
+        deadline = time.monotonic() + self.max_total_time
         for provider, homepage in self.PROVIDERS:
+            if time.monotonic() >= deadline:
+                break
             try:
-                page = self.session.get(homepage, timeout=self.timeout, allow_redirects=True)
+                remaining = max(1, deadline - time.monotonic())
+                page = self.session.get(homepage, timeout=min(self.timeout, remaining), allow_redirects=True)
                 if page.status_code >= 400:
                     continue
             except requests.RequestException:
                 continue
 
-            endpoints = self._script_endpoints(page)
+            endpoints = self._script_endpoints(page, deadline)
             for action in re.findall(r"<form[^>]+action=[\"']([^\"']+)", page.text, re.I):
                 endpoints.append(urljoin(page.url, html.unescape(action)))
             endpoints = list(dict.fromkeys(endpoints))
 
             for endpoint in endpoints:
-                for response in self._request_variants(endpoint, username, story_url, story_id):
+                if time.monotonic() >= deadline:
+                    break
+                for response in self._request_variants(endpoint, story_url, story_id, deadline):
+                    if time.monotonic() >= deadline:
+                        break
                     if response.status_code >= 400:
                         continue
                     media_urls = []
