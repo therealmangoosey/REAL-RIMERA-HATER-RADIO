@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -33,8 +34,9 @@ class StoryEndpointFallback:
         "video/x-m4v": ".m4v",
     }
 
-    def __init__(self, timeout=20):
+    def __init__(self, timeout=20, max_total_time=45):
         self.timeout = timeout
+        self.max_total_time = max_total_time
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
@@ -45,12 +47,12 @@ class StoryEndpointFallback:
 
     @staticmethod
     def username_from_url(url):
-        match = re.search(r"instagram\.com/(?:stories/)?([A-Za-z0-9._]+)/", url, re.I)
+        match = re.search(r"instagram\\.com/(?:stories/)?([A-Za-z0-9._]+)/", url, re.I)
         return match.group(1) if match else None
 
     @staticmethod
     def _story_id(url):
-        match = re.search(r"/stories/[A-Za-z0-9._]+/(\d+)", url, re.I)
+        match = re.search(r"/stories/[A-Za-z0-9._]+/(\\d+)", url, re.I)
         return match.group(1) if match else ""
 
     @classmethod
@@ -82,8 +84,6 @@ class StoryEndpointFallback:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return
             path = parsed.path.rstrip("/")
-            # Explicit media fields can contain a provider origin as well as the
-            # actual media URL. A bare origin is never a downloadable media item.
             if not path:
                 return
             found.append(candidate)
@@ -108,22 +108,6 @@ class StoryEndpointFallback:
         walk(value)
         return list(dict.fromkeys(found))
 
-    def _valid_media(self, path, content_type):
-        try:
-            with open(path, "rb") as fh:
-                head = fh.read(32)
-        except OSError:
-            return False
-        if content_type == "image/jpeg":
-            return head.startswith(b"\xff\xd8\xff")
-        if content_type == "image/png":
-            return head.startswith(b"\x89PNG\r\n\x1a\n")
-        if content_type == "image/webp":
-            return head.startswith(b"RIFF") and b"WEBP" in head[:16]
-        if content_type in {"video/mp4", "video/quicktime", "video/x-m4v"}:
-            return len(head) >= 8 and head[4:8] == b"ftyp"
-        return False
-
     def _download(self, urls, workdir, prefix):
         files = []
         seen = set()
@@ -145,7 +129,7 @@ class StoryEndpointFallback:
                         if chunk:
                             fh.write(chunk)
                 response.close()
-                if os.path.getsize(output) <= 4096 or not self._valid_media(output, content_type):
+                if os.path.getsize(output) <= 4096:
                     try:
                         os.remove(output)
                     except OSError:
@@ -173,14 +157,20 @@ class StoryEndpointFallback:
                     endpoints.add(absolute)
         return list(endpoints)[:20]
 
-    def _request_variants(self, endpoint, username, story_url, story_id):
+    def _request_variants(self, endpoint, story_url, story_id):
+        # Never query a bare username here. That asks generic Instagram
+        # downloaders for the user's posts and is how a Story URL can turn
+        # into a carousel of unrelated profile posts.
         payloads = [
-            {"url": story_url}, {"instagram_url": story_url}, {"story_url": story_url},
-            {"username": username}, {"handle": username}, {"user": username},
-            {"url": story_url, "username": username},
-            {"username": username, "story_id": story_id},
-            {"story_id": story_id, "url": story_url},
+            {"url": story_url},
+            {"instagram_url": story_url},
+            {"story_url": story_url},
         ]
+        if story_id:
+            payloads.extend([
+                {"story_id": story_id, "url": story_url},
+                {"story_id": story_id},
+            ])
         responses = []
         for payload in payloads:
             try:
@@ -202,9 +192,12 @@ class StoryEndpointFallback:
         if not username:
             return []
         story_id = self._story_id(story_url)
+        deadline = time.monotonic() + self.max_total_time
         for provider, homepage in self.PROVIDERS:
+            if time.monotonic() >= deadline:
+                break
             try:
-                page = self.session.get(homepage, timeout=self.timeout, allow_redirects=True)
+                page = self.session.get(homepage, timeout=min(self.timeout, max(1, deadline - time.monotonic())), allow_redirects=True)
                 if page.status_code >= 400:
                     continue
             except requests.RequestException:
@@ -216,7 +209,11 @@ class StoryEndpointFallback:
             endpoints = list(dict.fromkeys(endpoints))
 
             for endpoint in endpoints:
-                for response in self._request_variants(endpoint, username, story_url, story_id):
+                if time.monotonic() >= deadline:
+                    break
+                for response in self._request_variants(endpoint, story_url, story_id):
+                    if time.monotonic() >= deadline:
+                        break
                     if response.status_code >= 400:
                         continue
                     media_urls = []
