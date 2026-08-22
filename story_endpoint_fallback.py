@@ -21,7 +21,7 @@ class StoryEndpointFallback:
         ("SocialDawn", "https://www.socialdawn.com/instagram-story-downloader"),
         ("IGnony", "https://www.ignony.com/"),
     )
-    ABS_URL = re.compile(r"https?://[^\"'<>\\s]+", re.I)
+    ABS_URL = re.compile(r"https?://[^\"'<>\s]+", re.I)
     API_PATH = re.compile(r"[\"'](\/(?:api|ajax|graphql|v1|v2|fetch|download)[^\"']*)[\"']", re.I)
     MEDIA_EXTENSIONS = (".mp4", ".jpg", ".jpeg", ".png", ".webp", ".m4v", ".mov")
     MEDIA_TYPES = {
@@ -33,7 +33,7 @@ class StoryEndpointFallback:
         "video/x-m4v": ".m4v",
     }
 
-    def __init__(self, timeout=20, max_total_time=45):
+    def __init__(self, timeout=8, max_total_time=15):
         self.timeout = timeout
         self.max_total_time = max_total_time
         self.session = requests.Session()
@@ -83,8 +83,6 @@ class StoryEndpointFallback:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return
             path = parsed.path.rstrip("/")
-            # Explicit media fields can contain a provider origin as well as the
-            # actual media URL. A bare origin is never a downloadable media item.
             if not path:
                 return
             found.append(candidate)
@@ -125,15 +123,18 @@ class StoryEndpointFallback:
             return len(head) >= 8 and head[4:8] == b"ftyp"
         return False
 
-    def _download(self, urls, workdir, prefix):
+    def _download(self, urls, workdir, prefix, deadline):
         files = []
         seen = set()
         for url in urls:
+            if time.monotonic() >= deadline:
+                break
             if url in seen:
                 continue
             seen.add(url)
             try:
-                response = self.session.get(url, stream=True, timeout=self.timeout, allow_redirects=True)
+                remaining = max(1, deadline - time.monotonic())
+                response = self.session.get(url, stream=True, timeout=min(self.timeout, remaining), allow_redirects=True)
                 response.raise_for_status()
                 content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower().strip()
                 extension = self.MEDIA_TYPES.get(content_type)
@@ -143,9 +144,17 @@ class StoryEndpointFallback:
                 output = os.path.join(workdir, f"{prefix}-{len(files)+1:03d}{extension}")
                 with open(output, "wb") as fh:
                     for chunk in response.iter_content(262144):
+                        if time.monotonic() >= deadline:
+                            break
                         if chunk:
                             fh.write(chunk)
                 response.close()
+                if time.monotonic() >= deadline:
+                    try:
+                        os.remove(output)
+                    except OSError:
+                        pass
+                    break
                 if os.path.getsize(output) <= 4096 or not self._valid_media(output, content_type):
                     try:
                         os.remove(output)
@@ -178,9 +187,6 @@ class StoryEndpointFallback:
         return list(endpoints)[:20]
 
     def _request_variants(self, endpoint, story_url, story_id, deadline):
-        # Never query a bare username here. That asks generic Instagram
-        # downloaders for the user's posts and is how a Story URL can turn
-        # into a carousel of unrelated profile posts.
         payloads = [
             {"url": story_url},
             {"instagram_url": story_url},
@@ -222,18 +228,23 @@ class StoryEndpointFallback:
     def fetch(self, story_url, workdir):
         username = self.username_from_url(story_url)
         if not username:
+            logger.warning("Rejected invalid Instagram Story URL: %s", story_url)
             return []
         story_id = self._story_id(story_url)
         deadline = time.monotonic() + self.max_total_time
+        logger.info("Starting public Story resolver for %s (story_id=%s)", story_url, story_id or "unknown")
         for provider, homepage in self.PROVIDERS:
             if time.monotonic() >= deadline:
                 break
+            logger.info("Trying Story provider %s", provider)
             try:
                 remaining = max(1, deadline - time.monotonic())
                 page = self.session.get(homepage, timeout=min(self.timeout, remaining), allow_redirects=True)
                 if page.status_code >= 400:
+                    logger.info("Story provider %s returned HTTP %s", provider, page.status_code)
                     continue
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                logger.info("Story provider %s request failed: %s", provider, exc)
                 continue
 
             endpoints = self._script_endpoints(page, deadline)
@@ -256,9 +267,10 @@ class StoryEndpointFallback:
                         for match in self.ABS_URL.findall(response.text):
                             if self._is_media_url(match):
                                 media_urls.append(match)
-                    files = self._download(media_urls, workdir, "instagram-story")
+                    files = self._download(media_urls, workdir, "instagram-story", deadline)
                     if files:
-                        logger.info("%s JS/API fallback returned %d Story media item(s)", provider, len(files))
+                        logger.info("%s fallback returned %d Story media item(s)", provider, len(files))
                         return files
 
+        logger.info("Public Story resolver finished without media for %s", story_url)
         return []
