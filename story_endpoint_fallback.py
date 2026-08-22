@@ -36,6 +36,16 @@ class StoryEndpointFallback:
         "video/quicktime": ".mov",
         "video/x-m4v": ".m4v",
     }
+    ASSET_MARKERS = (
+        "/assets/", "/static/", "/css/", "/js/", "/fonts/", "/favicon",
+        "/logo", "/icon", "/avatar", "/profile", "/banner", "/badge",
+        "/button", "/placeholder", "/sprite", "/thumbnail", "/thumb/",
+    )
+    MEDIA_FIELD_MARKERS = (
+        "download_url", "download", "media_url", "media", "video_url", "video",
+        "image_url", "image", "photo_url", "photo", "video_versions", "image_versions2",
+        "source", "file", "file_url", "direct_url", "original_url",
+    )
 
     def __init__(self, timeout=8, max_total_time=15):
         self.timeout = timeout
@@ -59,40 +69,51 @@ class StoryEndpointFallback:
         return match.group(1) if match else ""
 
     @classmethod
+    def _is_provider_asset(cls, value):
+        parsed = urlparse(value)
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+        return any(marker in path for marker in cls.ASSET_MARKERS) or any(
+            marker in query for marker in ("logo=", "icon=", "avatar=", "thumbnail=", "thumb=")
+        )
+
+    @classmethod
     def _is_media_url(cls, value):
         if not isinstance(value, str) or not value.startswith(("http://", "https://")):
             return False
         value = html.unescape(value).replace("\\/", "/").strip()
         parsed = urlparse(value)
         path = parsed.path.lower().rstrip("/")
-        if not path:
-            return False
-        if any(bad in path for bad in ("/logo", "/icon", "/favicon", "/screenshot", "/assets/", "/static/", "/css/", "/js/")):
+        if not path or cls._is_provider_asset(value):
             return False
         host = (parsed.hostname or "").lower()
         cdn = any(token in host for token in ("cdninstagram", "fbcdn", "scontent", "igcdn"))
         ext = any(path.endswith(item) for item in cls.MEDIA_EXTENSIONS)
-        route = any(token in path for token in ("/media", "/download", "/story", "/video", "/photo", "/image", "/file"))
+        route = any(token in path for token in ("/media", "/download", "/story", "/stories/", "/video", "/photo", "/image", "/file"))
         return cdn or (ext and route)
 
     @classmethod
     def _collect_media_urls(cls, value):
         found = []
 
-        def add_candidate(candidate):
+        def add_candidate(candidate, explicit=False):
             if not isinstance(candidate, str):
                 return
             candidate = html.unescape(candidate).replace("\\/", "/").strip()
             parsed = urlparse(candidate)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return
-            if not parsed.path.rstrip("/"):
+            if not parsed.path.rstrip("/") or cls._is_provider_asset(candidate):
+                return
+            # A URL is only accepted from an explicitly media-labelled field,
+            # or when its URL itself clearly looks like a media object/CDN file.
+            if not explicit and not cls._is_media_url(candidate):
                 return
             found.append(candidate)
 
         def walk(obj, key_hint=""):
             key = str(key_hint).lower()
-            media_context = any(token in key for token in ("media", "download", "video", "image", "photo", "story", "file", "source", "url", "href"))
+            media_context = any(token in key for token in cls.MEDIA_FIELD_MARKERS)
             if isinstance(obj, dict):
                 for k, v in obj.items():
                     walk(v, k)
@@ -102,41 +123,38 @@ class StoryEndpointFallback:
             elif isinstance(obj, str):
                 text = html.unescape(obj).replace("\\/", "/")
                 for candidate in cls.ABS_URL.findall(text):
-                    if media_context or cls._is_media_url(candidate):
-                        add_candidate(candidate)
+                    add_candidate(candidate, explicit=media_context)
                 if media_context and text.startswith(("http://", "https://")):
-                    add_candidate(text)
+                    add_candidate(text, explicit=True)
 
         walk(value)
         return list(dict.fromkeys(found))
 
     @classmethod
     def _embedded_story_urls(cls, text, story_id, page_url=""):
-        """Extract media candidates from raw provider HTML/JSON.
-
-        Providers often render the actual story media inside embedded JSON or
-        data attributes rather than as visible <video>/<a> elements. We only
-        accept candidates tied to the requested Story ID or clearly marked as
-        story/download media, then validate the bytes during _download().
-        """
+        """Extract actual Story media, never generic provider page assets."""
         if not isinstance(text, str):
             return []
         found = []
-        for match in cls.ABS_URL.finditer(html.unescape(text)):
+        raw_text = html.unescape(text)
+        for match in cls.ABS_URL.finditer(raw_text):
             candidate = match.group(0).replace("\\/", "/").replace("\\u0026", "&")
             if not candidate.startswith(("http://", "https://")):
                 continue
-            context = text[max(0, match.start() - 700): min(len(text), match.end() + 700)].lower()
+            context = raw_text[max(0, match.start() - 700): min(len(raw_text), match.end() + 700)].lower()
             tied_to_story = bool(story_id and story_id.lower() in context)
-            story_context = any(token in context for token in ("story", "stories", "storyid", "story_id", "download", "media_url", "video_url", "image_url", "video_versions", "image_versions2"))
-            if tied_to_story or (story_context and cls._is_media_url(candidate)):
+            explicit_media = any(token in context for token in cls.MEDIA_FIELD_MARKERS)
+            if (tied_to_story or explicit_media) and cls._is_media_url(candidate):
                 found.append(candidate)
 
-        for raw in cls.ATTR_URL.findall(text):
+        for raw in cls.ATTR_URL.findall(raw_text):
             value = html.unescape(raw).replace("\\/", "/").strip()
             candidate = urljoin(page_url, value) if page_url else value
-            context = text[max(0, text.find(raw) - 300): min(len(text), text.find(raw) + len(raw) + 300)].lower()
-            if candidate.startswith(("http://", "https://")) and (story_id in context or any(token in context for token in ("story", "download", "media", "video", "image"))):
+            if not candidate.startswith(("http://", "https://")) or cls._is_provider_asset(candidate):
+                continue
+            context = raw_text[max(0, raw_text.find(raw) - 300): min(len(raw_text), raw_text.find(raw) + len(raw) + 300)].lower()
+            explicit_media = any(token in context for token in cls.MEDIA_FIELD_MARKERS)
+            if explicit_media and (cls._is_media_url(candidate) or any(name in context for name in ("data-media", "data-video", "data-image", "data-file", "data-download"))):
                 found.append(candidate)
 
         return list(dict.fromkeys(found))
@@ -291,7 +309,6 @@ class StoryEndpointFallback:
                 logger.info("Story provider %s request failed: %s", provider, exc)
                 continue
 
-            # First inspect the provider's already-rendered HTML/embedded state.
             media_urls = self._embedded_story_urls(page.text, story_id, page.url)
             files = self._download(media_urls, workdir, "instagram-story", deadline)
             if files:
