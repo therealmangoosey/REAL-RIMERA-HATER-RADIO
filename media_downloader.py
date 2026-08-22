@@ -8,7 +8,11 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-import parth_dl
+try:
+    import parth_dl
+except ModuleNotFoundError:
+    parth_dl = None
+
 import yt_dlp
 
 from instagram_fallback import InstagramFallbackError, InstagramPublicFallback
@@ -88,13 +92,14 @@ class MediaDownloader:
         return info, self._files(workdir)
 
     def _parth_dl_fallback(self, url, workdir):
-        try:
-            result = parth_dl.download(
-                url,
-                output_path=workdir,
-                quality="best",
-                verbose=False,
+        if parth_dl is None:
+            logging.getLogger("rimera-bot").warning(
+                "parth-dl is not installed; skipping Instagram post fallback. "
+                "Install dependencies with: python -m pip install -r requirements.txt"
             )
+            return []
+        try:
+            result = parth_dl.download(url, output_path=workdir, quality="best", verbose=False)
         except Exception as exc:
             logging.getLogger("rimera-bot").warning(
                 "parth-dl Instagram fallback failed for %s: %s", url, exc
@@ -133,8 +138,6 @@ class MediaDownloader:
 
             if self._is_instagram_story(url):
                 try:
-                    # New endpoint-discovery path first. This talks to the public
-                    # Story downloader's own resolver instead of harvesting page images.
                     files = self.story_endpoint_fallback.fetch(url, workdir)
                     if files:
                         logging.getLogger("rimera-bot").info(
