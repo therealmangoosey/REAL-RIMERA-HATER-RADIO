@@ -86,8 +86,9 @@ class StoryEndpointFallback:
         candidates=[]
         try: candidates.extend(cls._collect_media_urls(response.json()))
         except ValueError: pass
+        # Never use generic provider-page <img> elements as downloadable Story media.
         soup=BeautifulSoup(text,"lxml")
-        for tag in soup.find_all(["video","source","a","img"]):
+        for tag in soup.find_all(["video","source","a"]):
             for attr in ("src","href","data-src","data-media","data-video","data-image","data-file","data-download"):
                 value=tag.get(attr)
                 if not value: continue
@@ -148,7 +149,6 @@ class StoryEndpointFallback:
                 responses.append((self.session.post(page.url,data=payload,timeout=min(self.timeout,remaining),allow_redirects=True),True))
             except requests.RequestException:
                 pass
-        # Also try the exact story URL and username as fragment/query inputs on the provider's current path.
         for key,value in (("instagram_url",story_url),("story_url",story_url),("username",username)):
             if time.monotonic()>=deadline: break
             try:
