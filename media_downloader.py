@@ -54,12 +54,11 @@ class MediaDownloader:
         return any(path.startswith(prefix) for prefix in ("/p/", "/reel/", "/reels/", "/tv/"))
 
     def _options(self, url, workdir, use_cookies=False):
-        is_instagram = self._is_instagram(url)
         options = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
             "outtmpl": os.path.join(workdir, "%(playlist_index|0)03d-%(id)s.%(ext)s"),
-            "noplaylist": not is_instagram,
+            "noplaylist": not self._is_instagram(url),
             "quiet": True,
             "no_warnings": False,
             "restrictfilenames": True,
@@ -107,7 +106,6 @@ class MediaDownloader:
             candidates = [os.fspath(result)]
         else:
             candidates = [os.fspath(item) for item in result if isinstance(item, (str, os.PathLike))]
-
         valid = []
         for path in candidates:
             if not os.path.isabs(path):
@@ -116,47 +114,71 @@ class MediaDownloader:
                 valid.append(path)
         return sorted(set(valid))
 
+    def _download_story_public_first(self, url, workdir):
+        """Try public Story resolvers before yt-dlp, which often requires login for Stories."""
+        try:
+            files = self.story_endpoint_fallback.fetch(url, workdir)
+            if files:
+                logging.getLogger("rimera-bot").info(
+                    "Public Story endpoint fallback returned %d media item(s)", len(files)
+                )
+                return files, "public Story endpoint fallback"
+        except Exception as exc:
+            logging.getLogger("rimera-bot").warning(
+                "Public Story endpoint fallback failed: %s", exc
+            )
+
+        try:
+            files = self.instagram_fallback.fetch(url, workdir)
+            if files:
+                logging.getLogger("rimera-bot").info(
+                    "Public Story page fallback returned %d media item(s)", len(files)
+                )
+                return files, "public Story page fallback"
+        except InstagramFallbackError as exc:
+            logging.getLogger("rimera-bot").warning(
+                "Public Instagram Story fallback chain failed: %s", exc
+            )
+        return [], "public Story fallbacks returned no media"
+
     def download(self, url):
         workdir = tempfile.mkdtemp(prefix="rimera-media-")
         try:
             anonymous_error = ""
+            fallback_error = None
+
+            # Instagram Stories are handled by public resolvers first. yt-dlp's
+            # Instagram Story extractor frequently demands authentication even for
+            # Stories that are publicly viewable in a browser.
+            if self._is_instagram_story(url):
+                files, source = self._download_story_public_first(url, workdir)
+                if files:
+                    return workdir, files, {"source": source}
+                fallback_error = source
+
+                if self.cookies_file:
+                    try:
+                        info, files = self._extract(url, workdir, use_cookies=True)
+                        if files:
+                            return workdir, files, info
+                    except Exception as cookie_error:
+                        fallback_error = f"{fallback_error}; authenticated session: {cookie_error}"
+
+                raise MediaDownloadError(
+                    "Instagram Story could not be downloaded publicly. "
+                    f"Public fallbacks: {fallback_error}. No cookies are required for the public path."
+                )
+
+            # Non-Story media keeps the existing yt-dlp-first path.
             try:
                 info, files = self._extract(url, workdir, use_cookies=False)
                 if files:
                     return workdir, files, info
+                anonymous_error = "yt-dlp returned no media"
             except Exception as exc:
                 anonymous_error = str(exc)
-            else:
-                anonymous_error = "yt-dlp returned no media"
 
-            fallback_error = None
-
-            if self._is_instagram_story(url):
-                try:
-                    # New endpoint-discovery path first. This talks to the public
-                    # Story downloader's own resolver instead of harvesting page images.
-                    files = self.story_endpoint_fallback.fetch(url, workdir)
-                    if files:
-                        logging.getLogger("rimera-bot").info(
-                            "JS/API Story fallback returned %d Instagram Story media item(s)", len(files)
-                        )
-                        return workdir, files, {"source": "anonymous-instagram-story-endpoint-fallback"}
-                except Exception as exc:
-                    fallback_error = f"endpoint fallback: {exc}"
-                    logging.getLogger("rimera-bot").warning(
-                        "Instagram Story endpoint fallback failed: %s", exc
-                    )
-
-                try:
-                    files = self.instagram_fallback.fetch(url, workdir)
-                    if files:
-                        return workdir, files, {"source": "anonymous-instagram-story-fallback"}
-                except InstagramFallbackError as exc:
-                    fallback_error = f"{fallback_error or 'endpoint fallback failed'}; page fallback: {exc}"
-                    logging.getLogger("rimera-bot").warning(
-                        "Instagram anonymous Story fallback chain failed: %s", fallback_error
-                    )
-            elif self._instagram_post_or_reel(url):
+            if self._instagram_post_or_reel(url):
                 files = self._parth_dl_fallback(url, workdir)
                 if files:
                     logging.getLogger("rimera-bot").info(
@@ -211,15 +233,11 @@ class MediaDownloader:
         duration = self._video_duration(path)
         if duration <= 0:
             return None
-
         output = f"{Path(path).stem}-discord.mp4"
         audio_kbps = 96
         usable_bits = max(64_000, (target_bytes - 24_000) * 8)
-        total_kbps = max(180, int(usable_bits / duration / 1000))
-        video_kbps = max(80, total_kbps - audio_kbps)
-        bitrate = video_kbps
+        bitrate = max(80, int(usable_bits / duration / 1000) - audio_kbps)
         best = None
-
         for attempt in range(7):
             candidate = f"{Path(path).stem}-discord-{attempt}.mp4"
             command = [
@@ -235,7 +253,6 @@ class MediaDownloader:
             if not os.path.exists(candidate):
                 bitrate *= 0.75
                 continue
-
             size = os.path.getsize(candidate)
             if size <= target_bytes:
                 if best and best != candidate:
@@ -253,7 +270,6 @@ class MediaDownloader:
                 except OSError:
                     pass
                 bitrate *= max(0.55, (target_bytes / size) * 0.97)
-
         if best:
             os.replace(best, output)
             return output
@@ -268,22 +284,19 @@ class MediaDownloader:
         quality = 95
         scale = 1.0
         best = None
-
         for attempt in range(9):
             candidate = f"{Path(path).stem}-discord-{attempt}.jpg"
             filters = []
             if scale < 0.999:
                 filters.append(f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2")
-            vf = ["-vf", ",".join(filters)] if filters else []
-            command = [
-                ffmpeg, "-y", "-i", path, *vf,
-                "-frames:v", "1", "-c:v", "mjpeg", "-q:v", str(max(2, quality)), candidate,
-            ]
+            command = [ffmpeg, "-y", "-i", path]
+            if filters:
+                command += ["-vf", ",".join(filters)]
+            command += ["-frames:v", "1", "-c:v", "mjpeg", "-q:v", str(max(2, quality)), candidate]
             subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             if not os.path.exists(candidate):
                 quality -= 7
                 continue
-
             size = os.path.getsize(candidate)
             if size <= target_bytes:
                 if best and best != candidate:
@@ -305,18 +318,15 @@ class MediaDownloader:
                     pass
                 quality = max(45, quality - 8)
                 scale *= 0.94
-
         if best:
             os.replace(best, output)
             return output
         return None
 
     def fit_for_discord(self, path, max_bytes=None):
-        """Return original or the highest-quality version that safely fits max_bytes."""
         limit = int(max_bytes or self.max_bytes)
         if os.path.getsize(path) <= limit:
             return path
-
         target = self._safe_target(limit)
         suffix = Path(path).suffix.lower()
         if suffix in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}:
