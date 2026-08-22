@@ -26,7 +26,7 @@ class StoryEndpointFallback:
     MEDIA_EXTENSIONS = (".mp4", ".jpg", ".jpeg", ".png", ".webp", ".m4v", ".mov")
     MEDIA_TYPES = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","video/mp4":".mp4","video/quicktime":".mov","video/x-m4v":".m4v"}
     BAD_PATHS = ("/assets/","/static/","/css/","/js/","/fonts/","/favicon","/logo","/icon","/avatar","/profile","/banner","/badge","/button","/placeholder","/sprite","/thumbnail","/thumb/","/screenshot")
-    MEDIA_HINTS = ("download","media","video","image","photo","story","file","source","original")
+    MEDIA_HINTS = ("download","media","video","image","photo","story","file","source","original","direct","attachment")
 
     def __init__(self, timeout=8, max_total_time=20):
         self.timeout = timeout
@@ -45,7 +45,7 @@ class StoryEndpointFallback:
         return match.group(1) if match else ""
 
     @classmethod
-    def _is_media_url(cls, value):
+    def _is_media_url(cls, value, allow_plain_media=False):
         if not isinstance(value, str) or not value.startswith(("http://","https://")):
             return False
         value = html.unescape(value).replace("\\/","/").strip()
@@ -54,8 +54,15 @@ class StoryEndpointFallback:
         if not path or any(marker in path for marker in cls.BAD_PATHS):
             return False
         host = (parsed.hostname or "").lower()
-        cdn = any(token in host for token in ("cdninstagram","fbcdn","scontent","igcdn"))
-        return cdn or (path.endswith(cls.MEDIA_EXTENSIONS) and any(token in path for token in ("/media","/download","/story","/video","/photo","/image","/file")))
+        if host in {"instagram.com", "www.instagram.com"} or host.endswith(".instagram.com"):
+            return False
+        if any(token in host for token in ("cdninstagram","fbcdn","scontent","igcdn")):
+            return True
+        if path.endswith(cls.MEDIA_EXTENSIONS):
+            if allow_plain_media:
+                return True
+            return any(token in path for token in ("/media","/download","/story","/video","/photo","/image","/file"))
+        return False
 
     @classmethod
     def _collect_media_urls(cls, payload):
@@ -76,7 +83,7 @@ class StoryEndpointFallback:
         return list(dict.fromkeys(found))
 
     @classmethod
-    def _extract_candidates(cls,response,story_id):
+    def _extract_candidates(cls,response,story_id,trusted_result=False):
         text=html.unescape(response.text).replace("\\/","/").replace("\\u0026","&")
         candidates=[]
         try: candidates.extend(cls._collect_media_urls(response.json()))
@@ -88,20 +95,24 @@ class StoryEndpointFallback:
                 if not value: continue
                 candidate=urljoin(response.url,html.unescape(value).strip())
                 label=(" ".join(tag.stripped_strings)+" "+str(tag.attrs)).lower()
-                if cls._is_media_url(candidate) and (any(h in label for h in cls.MEDIA_HINTS) or story_id in text): candidates.append(candidate)
+                if cls._is_media_url(candidate,allow_plain_media=trusted_result) and (trusted_result or any(h in label for h in cls.MEDIA_HINTS)):
+                    candidates.append(candidate)
         for match in cls.URL_RE.finditer(text):
             candidate=match.group(0)
-            context=text[max(0,match.start()-1200):min(len(text),match.end()+1200)].lower()
-            if cls._is_media_url(candidate) and story_id and story_id.lower() in context: candidates.append(candidate)
+            context=text[max(0,match.start()-1400):min(len(text),match.end()+1400)].lower()
+            story_context=bool(story_id and story_id.lower() in context)
+            media_context=any(h in context for h in cls.MEDIA_HINTS)
+            if cls._is_media_url(candidate,allow_plain_media=trusted_result) and (story_context or (trusted_result and media_context)):
+                candidates.append(candidate)
         return list(dict.fromkeys(candidates))
 
     def _submit_forms(self,page,story_url,username,deadline):
-        responses=[page]
+        responses=[]
         soup=BeautifulSoup(page.text,"lxml")
         for form in soup.find_all("form"):
             if time.monotonic()>=deadline: break
             fields={}
-            for control in form.find_all(["input","textarea"]):
+            for control in form.find_all(["input","textarea","select"]):
                 name=control.get("name")
                 if not name: continue
                 hint=" ".join([name.lower(),(control.get("placeholder") or "").lower(),(control.get("aria-label") or "").lower()])
@@ -114,8 +125,9 @@ class StoryEndpointFallback:
             method=(form.get("method") or "get").lower()
             try:
                 remaining=max(1,deadline-time.monotonic())
-                if method=="post": responses.append(self.session.post(action,data=fields,timeout=min(self.timeout,remaining),allow_redirects=True))
-                else: responses.append(self.session.get(action,params=fields,timeout=min(self.timeout,remaining),allow_redirects=True))
+                if method=="post": result=self.session.post(action,data=fields,timeout=min(self.timeout,remaining),allow_redirects=True)
+                else: result=self.session.get(action,params=fields,timeout=min(self.timeout,remaining),allow_redirects=True)
+                responses.append((result,True))
             except requests.RequestException as exc:
                 logger.info("Provider form failed: %s",exc)
         return responses
@@ -141,7 +153,12 @@ class StoryEndpointFallback:
                     try: os.remove(path)
                     except OSError: pass
                     break
-                if os.path.getsize(path)<=4096: os.remove(path); continue
+                if os.path.getsize(path)<=4096:
+                    os.remove(path); continue
+                with open(path,"rb") as handle: head=handle.read(32)
+                valid=((content_type=="image/jpeg" and head.startswith(b"\xff\xd8\xff")) or (content_type=="image/png" and head.startswith(b"\x89PNG\r\n\x1a\n")) or (content_type=="image/webp" and head.startswith(b"RIFF") and b"WEBP" in head[:16]) or (content_type in {"video/mp4","video/quicktime","video/x-m4v"} and len(head)>=8 and head[4:8]==b"ftyp"))
+                if not valid:
+                    os.remove(path); continue
                 files.append(path)
             except (requests.RequestException,OSError): continue
         return files
@@ -162,9 +179,9 @@ class StoryEndpointFallback:
             except requests.RequestException as exc:
                 logger.info("%s unavailable: %s",name,exc)
                 continue
-            for response in self._submit_forms(page,story_url,username,deadline):
+            for response,trusted in self._submit_forms(page,story_url,username,deadline):
                 if time.monotonic()>=deadline: break
-                files=self._download(self._extract_candidates(response,story_id),workdir,deadline)
+                files=self._download(self._extract_candidates(response,story_id,trusted_result=trusted),workdir,deadline)
                 if files:
                     logger.info("%s returned %d validated Story source file(s)",name,len(files))
                     return files
