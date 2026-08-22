@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -11,7 +12,7 @@ logger = logging.getLogger("rimera-bot.story-endpoint-fallback")
 
 
 class StoryEndpointFallback:
-    """Lightweight, no-browser Story resolver."""
+    """Lightweight, no-browser Story resolver with a hard overall timeout."""
 
     PROVIDERS = (
         ("DownloadIGStory", "https://downloadigstory.com/"),
@@ -33,8 +34,9 @@ class StoryEndpointFallback:
         "video/x-m4v": ".m4v",
     }
 
-    def __init__(self, timeout=20):
+    def __init__(self, timeout=20, max_fetch_seconds=45):
         self.timeout = timeout
+        self.max_fetch_seconds = max_fetch_seconds
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
@@ -82,8 +84,6 @@ class StoryEndpointFallback:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return
             path = parsed.path.rstrip("/")
-            # Explicit media fields can contain a provider origin as well as the
-            # actual media URL. A bare origin is never a downloadable media item.
             if not path:
                 return
             found.append(candidate)
@@ -202,9 +202,15 @@ class StoryEndpointFallback:
         if not username:
             return []
         story_id = self._story_id(story_url)
+        deadline = time.monotonic() + self.max_fetch_seconds
+
         for provider, homepage in self.PROVIDERS:
+            if time.monotonic() >= deadline:
+                logger.warning("Story fallback timed out after %ss for %s", self.max_fetch_seconds, story_url)
+                break
             try:
-                page = self.session.get(homepage, timeout=self.timeout, allow_redirects=True)
+                remaining = max(1, min(self.timeout, int(deadline - time.monotonic())))
+                page = self.session.get(homepage, timeout=remaining, allow_redirects=True)
                 if page.status_code >= 400:
                     continue
             except requests.RequestException:
@@ -216,7 +222,11 @@ class StoryEndpointFallback:
             endpoints = list(dict.fromkeys(endpoints))
 
             for endpoint in endpoints:
+                if time.monotonic() >= deadline:
+                    break
                 for response in self._request_variants(endpoint, username, story_url, story_id):
+                    if time.monotonic() >= deadline:
+                        break
                     if response.status_code >= 400:
                         continue
                     media_urls = []
