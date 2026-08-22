@@ -54,14 +54,12 @@ class StoryEndpointFallback:
         if not path or any(marker in path for marker in cls.BAD_PATHS):
             return False
         host = (parsed.hostname or "").lower()
-        if host in {"instagram.com", "www.instagram.com"} or host.endswith(".instagram.com"):
+        if host == "instagram.com" or host == "www.instagram.com" or host.endswith(".instagram.com"):
             return False
         if any(token in host for token in ("cdninstagram","fbcdn","scontent","igcdn")):
             return True
         if path.endswith(cls.MEDIA_EXTENSIONS):
-            if allow_plain_media:
-                return True
-            return any(token in path for token in ("/media","/download","/story","/video","/photo","/image","/file"))
+            return allow_plain_media or any(token in path for token in ("/media","/download","/story","/video","/photo","/image","/file"))
         return False
 
     @classmethod
@@ -117,7 +115,7 @@ class StoryEndpointFallback:
                 if not name: continue
                 hint=" ".join([name.lower(),(control.get("placeholder") or "").lower(),(control.get("aria-label") or "").lower()])
                 value=control.get("value","")
-                if any(x in hint for x in ("story","url","link")): value=story_url
+                if any(x in hint for x in ("story","url","link","input","query","search","text")): value=story_url
                 elif any(x in hint for x in ("username","handle","user","profile")): value=username
                 fields[name]=value
             if not fields: continue
@@ -132,6 +130,34 @@ class StoryEndpointFallback:
                 logger.info("Provider form failed: %s",exc)
         return responses
 
+    def _submit_generic_requests(self,page,story_url,username,deadline):
+        """Support modern JS-driven provider UIs that expose no HTML <form>."""
+        responses=[]
+        common_keys=("url","link","query","q","text","input","search","instagram_url","story_url")
+        for key in common_keys:
+            if time.monotonic()>=deadline: break
+            payload={key:story_url}
+            try:
+                remaining=max(1,deadline-time.monotonic())
+                responses.append((self.session.get(page.url,params=payload,timeout=min(self.timeout,remaining),allow_redirects=True),True))
+            except requests.RequestException:
+                pass
+            if time.monotonic()>=deadline: break
+            try:
+                remaining=max(1,deadline-time.monotonic())
+                responses.append((self.session.post(page.url,data=payload,timeout=min(self.timeout,remaining),allow_redirects=True),True))
+            except requests.RequestException:
+                pass
+        # Also try the exact story URL and username as fragment/query inputs on the provider's current path.
+        for key,value in (("instagram_url",story_url),("story_url",story_url),("username",username)):
+            if time.monotonic()>=deadline: break
+            try:
+                remaining=max(1,deadline-time.monotonic())
+                responses.append((self.session.post(page.url,data={key:value},timeout=min(self.timeout,remaining),allow_redirects=True),True))
+            except requests.RequestException:
+                pass
+        return responses
+
     def _download(self,urls,workdir,deadline):
         files=[]
         for url in list(dict.fromkeys(urls)):
@@ -141,7 +167,7 @@ class StoryEndpointFallback:
                 response=self.session.get(url,stream=True,timeout=min(self.timeout,remaining),allow_redirects=True)
                 response.raise_for_status()
                 content_type=(response.headers.get("content-type") or "").split(";",1)[0].lower().strip()
-                ext={"image/jpeg":".jpg","image/png":".png","image/webp":".webp","video/mp4":".mp4","video/quicktime":".mov","video/x-m4v":".m4v"}.get(content_type)
+                ext=self.MEDIA_TYPES.get(content_type)
                 if not ext: response.close(); continue
                 path=os.path.join(workdir,f"instagram-story-{len(files)+1:03d}{ext}")
                 with open(path,"wb") as handle:
@@ -179,7 +205,9 @@ class StoryEndpointFallback:
             except requests.RequestException as exc:
                 logger.info("%s unavailable: %s",name,exc)
                 continue
-            for response,trusted in self._submit_forms(page,story_url,username,deadline):
+            submissions=self._submit_forms(page,story_url,username,deadline)
+            submissions.extend(self._submit_generic_requests(page,story_url,username,deadline))
+            for response,trusted in submissions:
                 if time.monotonic()>=deadline: break
                 files=self._download(self._extract_candidates(response,story_id,trusted_result=trusted),workdir,deadline)
                 if files:
