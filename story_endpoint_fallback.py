@@ -67,77 +67,49 @@ class StoryEndpointFallback:
         path = parsed.path.lower().rstrip("/")
         if not path:
             return False
+        host = (parsed.hostname or "").lower()
+        # Never treat Instagram's own page/assets as a downloaded source file.
+        if host == "instagram.com" or host.endswith(".instagram.com"):
+            return False
         if any(bad in path for bad in ("/logo", "/icon", "/favicon", "/screenshot", "/assets/", "/static/", "/css/", "/js/")):
             return False
-        host = (parsed.hostname or "").lower()
-        cdn = any(token in host for token in ("cdninstagram", "fbcdn", "scontent", "igcdn"))
         ext = any(path.endswith(item) for item in cls.MEDIA_EXTENSIONS)
         route = any(token in path for token in ("/media", "/download", "/story", "/video", "/photo", "/image", "/file"))
-        return cdn or (ext and route)
-
-    @classmethod
-    def _collect_media_urls(cls, value):
-        found = []
-
-        def add_candidate(candidate):
-            if not isinstance(candidate, str):
-                return
-            candidate = html.unescape(candidate).replace("\\/", "/").strip()
-            parsed = urlparse(candidate)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                return
-            if not parsed.path.rstrip("/"):
-                return
-            found.append(candidate)
-
-        def walk(obj, key_hint=""):
-            key = str(key_hint).lower()
-            media_context = any(token in key for token in ("media", "download", "video", "image", "photo", "story", "file", "source", "url", "href"))
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    walk(v, k)
-            elif isinstance(obj, list):
-                for item in obj:
-                    walk(item, key_hint)
-            elif isinstance(obj, str):
-                text = html.unescape(obj).replace("\\/", "/")
-                for candidate in cls.ABS_URL.findall(text):
-                    if media_context or cls._is_media_url(candidate):
-                        add_candidate(candidate)
-                if media_context and text.startswith(("http://", "https://")):
-                    add_candidate(text)
-
-        walk(value)
-        return list(dict.fromkeys(found))
+        return ext and route
 
     @classmethod
     def _embedded_story_urls(cls, text, story_id, page_url=""):
-        """Extract media candidates from raw provider HTML/JSON.
+        """Return only provider-hosted media explicitly tied to this Story ID.
 
-        Providers often render the actual story media inside embedded JSON or
-        data attributes rather than as visible <video>/<a> elements. We only
-        accept candidates tied to the requested Story ID or clearly marked as
-        story/download media, then validate the bytes during _download().
+        Generic provider images, logos, thumbnails and profile assets are never
+        accepted. A candidate must be in a Story-specific context containing the
+        exact requested Story ID and must look like a real media source URL.
         """
-        if not isinstance(text, str):
+        if not isinstance(text, str) or not story_id:
             return []
+        text = html.unescape(text).replace("\\/", "/").replace("\\u0026", "&")
         found = []
-        for match in cls.ABS_URL.finditer(html.unescape(text)):
-            candidate = match.group(0).replace("\\/", "/").replace("\\u0026", "&")
-            if not candidate.startswith(("http://", "https://")):
-                continue
-            context = text[max(0, match.start() - 700): min(len(text), match.end() + 700)].lower()
-            tied_to_story = bool(story_id and story_id.lower() in context)
-            story_context = any(token in context for token in ("story", "stories", "storyid", "story_id", "download", "media_url", "video_url", "image_url", "video_versions", "image_versions2"))
-            if tied_to_story or (story_context and cls._is_media_url(candidate)):
-                found.append(candidate)
 
-        for raw in cls.ATTR_URL.findall(text):
-            value = html.unescape(raw).replace("\\/", "/").strip()
-            candidate = urljoin(page_url, value) if page_url else value
-            context = text[max(0, text.find(raw) - 300): min(len(text), text.find(raw) + len(raw) + 300)].lower()
-            if candidate.startswith(("http://", "https://")) and (story_id in context or any(token in context for token in ("story", "download", "media", "video", "image"))):
-                found.append(candidate)
+        def add(candidate, context):
+            candidate = html.unescape(candidate).replace("\\/", "/").strip()
+            if candidate.startswith(("http://", "https://")):
+                candidate = urljoin(page_url, candidate)
+            parsed = urlparse(candidate)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return
+            if story_id.lower() not in context.lower():
+                return
+            if not cls._is_media_url(candidate):
+                return
+            found.append(candidate)
+
+        for match in cls.ABS_URL.finditer(text):
+            context = text[max(0, match.start() - 1200): min(len(text), match.end() + 1200)]
+            add(match.group(0), context)
+
+        for match in cls.ATTR_URL.finditer(text):
+            context = text[max(0, match.start() - 1200): min(len(text), match.end() + 1200)]
+            add(match.group(1), context)
 
         return list(dict.fromkeys(found))
 
@@ -170,6 +142,10 @@ class StoryEndpointFallback:
                 remaining = max(1, deadline - time.monotonic())
                 response = self.session.get(url, stream=True, timeout=min(self.timeout, remaining), allow_redirects=True)
                 response.raise_for_status()
+                final_host = (urlparse(response.url).hostname or "").lower()
+                if final_host == "instagram.com" or final_host.endswith(".instagram.com"):
+                    response.close()
+                    continue
                 content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower().strip()
                 extension = self.MEDIA_TYPES.get(content_type)
                 if not extension:
@@ -259,15 +235,6 @@ class StoryEndpointFallback:
                 pass
         return responses
 
-    def _response_media_candidates(self, response, story_id):
-        candidates = []
-        try:
-            candidates.extend(self._collect_media_urls(response.json()))
-        except ValueError:
-            pass
-        candidates.extend(self._embedded_story_urls(response.text, story_id, response.url))
-        return list(dict.fromkeys(candidates))
-
     def fetch(self, story_url, workdir):
         username = self.username_from_url(story_url)
         if not username:
@@ -291,11 +258,11 @@ class StoryEndpointFallback:
                 logger.info("Story provider %s request failed: %s", provider, exc)
                 continue
 
-            # First inspect the provider's already-rendered HTML/embedded state.
+            # Only exact Story-ID-linked source files are considered.
             media_urls = self._embedded_story_urls(page.text, story_id, page.url)
             files = self._download(media_urls, workdir, "instagram-story", deadline)
             if files:
-                logger.info("%s direct HTML/JSON extraction returned %d Story media item(s)", provider, len(files))
+                logger.info("%s direct Story-source extraction returned %d media item(s)", provider, len(files))
                 return files
 
             endpoints = self._script_endpoints(page, deadline)
@@ -311,9 +278,13 @@ class StoryEndpointFallback:
                         break
                     if response.status_code >= 400:
                         continue
-                    files = self._download(self._response_media_candidates(response, story_id), workdir, "instagram-story", deadline)
+                    # Parse raw response text only: this preserves the exact
+                    # Story-ID context around each candidate and prevents
+                    # unrelated provider logos/images from being selected.
+                    candidates = self._embedded_story_urls(response.text, story_id, response.url)
+                    files = self._download(candidates, workdir, "instagram-story", deadline)
                     if files:
-                        logger.info("%s fallback returned %d Story media item(s)", provider, len(files))
+                        logger.info("%s Story-source fallback returned %d media item(s)", provider, len(files))
                         return files
 
         logger.info("Public Story resolver finished without media for %s", story_url)
