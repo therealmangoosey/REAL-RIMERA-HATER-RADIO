@@ -4,8 +4,6 @@ Designed for a local/Termux checkout. GitHub is contacted only once every
 15 minutes, so this does not hammer the API or restart unnecessarily.
 """
 
-import os
-import signal
 import subprocess
 import sys
 import time
@@ -62,8 +60,8 @@ def apply_update():
 
 
 def start_bot():
-    print("[auto-update] Starting bot.py", flush=True)
-    return subprocess.Popen([sys.executable, "bot.py"], cwd=ROOT)
+    print("[auto-update] Starting run_bot.py", flush=True)
+    return subprocess.Popen([sys.executable, "run_bot.py"], cwd=ROOT)
 
 
 def stop_bot(process):
@@ -93,13 +91,9 @@ def main():
 
             print("[auto-update] New update found. Stopping bot before pulling...", flush=True)
             stop_bot(bot)
-            if apply_update():
-                bot = start_bot()
-            else:
-                bot = start_bot()
+            apply_update()
+            bot = start_bot()
 
-            # The child may have exited immediately because of a bad update.
-            # Keep the supervisor alive so a later check can recover.
             if bot.poll() is not None:
                 print("[auto-update] Bot exited; supervisor will keep monitoring.", flush=True)
 
