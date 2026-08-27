@@ -16,6 +16,8 @@ KEYWORD_REACTIONS: Dict[str, str] = {
     "vol 1": "<:CatchMeIfYouCan:1480703883356536985>",
     "volume 1": "<:CatchMeIfYouCan:1480703883356536985>",
     "volume one": "<:CatchMeIfYouCan:1480703883356536985>",
+    "catch me if you can": "<:CatchMeIfYouCan:1480703883356536985>",
+    "cmiyc": "<:CatchMeIfYouCan:1480703883356536985>",
     "vol 2": "<:RealRimeraHaterRadio:1504949135655305246>",
     "volume 2": "<:RealRimeraHaterRadio:1504949135655305246>",
     "volume two": "<:RealRimeraHaterRadio:1504949135655305246>",
