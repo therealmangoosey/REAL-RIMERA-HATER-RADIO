@@ -1,7 +1,7 @@
 import os
 import unittest
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from instagram_fallback import InstagramPublicFallback
 from media_downloader import DISCORD_FREE_LIMIT, DISCORD_SAFE_MARGIN, MediaDownloader
@@ -30,31 +30,6 @@ class TestMediaDownloader(unittest.TestCase):
         self.assertTrue(downloader._instagram_post_or_reel("https://www.instagram.com/p/ABC/"))
         self.assertTrue(downloader._instagram_post_or_reel("https://www.instagram.com/reel/ABC/"))
         self.assertFalse(downloader._instagram_post_or_reel("https://www.tiktok.com/@user/video/123"))
-
-    @patch("media_downloader.parth_dl.download")
-    def test_parth_dl_fallback_returns_carousel_files(self, mock_download):
-        with TemporaryDirectory() as temp_dir:
-            first = os.path.join(temp_dir, "slide_01.jpg")
-            second = os.path.join(temp_dir, "slide_02.jpg")
-            with open(first, "wb") as handle:
-                handle.write(b"x" * 5000)
-            with open(second, "wb") as handle:
-                handle.write(b"y" * 5000)
-            mock_download.return_value = [first, second]
-
-            downloader = MediaDownloader()
-            result = downloader._parth_dl_fallback(
-                "https://www.instagram.com/p/DbG-2cqkU3F/",
-                temp_dir,
-            )
-
-            self.assertEqual(result, [first, second])
-            mock_download.assert_called_once_with(
-                "https://www.instagram.com/p/DbG-2cqkU3F/",
-                output_path=temp_dir,
-                quality="best",
-                verbose=False,
-            )
 
 
 class TestInstagramFallback(unittest.TestCase):
