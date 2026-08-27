@@ -1,17 +1,15 @@
 """Alias-based custom emoji reactions for the Rimera bot."""
 
-import asyncio
 import json
+import logging
 import os
 import re
 from typing import Dict, List
 
 CONFIG_FILE = "config.json"
 REACTIONS_ENABLED_KEY = "reactions_enabled"
+logger = logging.getLogger("rimera-bot.reactions")
 
-# Keep this table explicit and local. Do not populate it from Discord/API data.
-# Each key is a manual alias/phrase and each value is the exact custom emoji
-# string to add when that phrase appears in a message.
 KEYWORD_REACTIONS: Dict[str, str] = {
     "jazz punk": "<:JazzPunk:1395637360682602587>",
     "bushwa": "<:BUSHWA:1395637306408566805>",
@@ -37,7 +35,6 @@ _COMPILED_REACTIONS = [
 
 
 def _load_enabled() -> bool:
-    """Read the persistent toggle, defaulting to enabled for existing installs."""
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
             config = json.load(handle)
@@ -50,21 +47,17 @@ _reactions_enabled = _load_enabled()
 
 
 def reactions_enabled() -> bool:
-    """Return whether automatic keyword reactions are currently enabled."""
     return _reactions_enabled
 
 
 def set_reactions_enabled(enabled: bool) -> bool:
-    """Persist and apply the automatic reaction toggle."""
     global _reactions_enabled
-
     try:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
                 config = json.load(handle)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             config = {}
-
         config[REACTIONS_ENABLED_KEY] = bool(enabled)
         temp_path = f"{CONFIG_FILE}.tmp"
         with open(temp_path, "w", encoding="utf-8") as handle:
@@ -72,17 +65,15 @@ def set_reactions_enabled(enabled: bool) -> bool:
             handle.write("\n")
         os.replace(temp_path, CONFIG_FILE)
     except OSError:
+        logger.exception("Could not persist reaction setting")
         return False
-
     _reactions_enabled = bool(enabled)
     return True
 
 
 def matching_reactions(content: str) -> List[str]:
-    """Return unique custom emojis for every matching configured alias."""
     if not content:
         return []
-
     found: List[str] = []
     for pattern, emoji in _COMPILED_REACTIONS:
         if pattern.search(content) and emoji not in found:
@@ -91,7 +82,6 @@ def matching_reactions(content: str) -> List[str]:
 
 
 async def react_to_message(message) -> None:
-    """React to a message when the persistent reaction toggle is enabled."""
     if not reactions_enabled() or message.author.bot or not message.content:
         return
 
@@ -99,7 +89,21 @@ async def react_to_message(message) -> None:
     if not emojis:
         return
 
-    await asyncio.gather(
-        *(message.add_reaction(emoji) for emoji in emojis),
-        return_exceptions=True,
-    )
+    import discord
+
+    for emoji_text in emojis:
+        emoji = discord.PartialEmoji.from_str(emoji_text)
+        if emoji.id is None:
+            logger.error("Invalid configured custom emoji: %s", emoji_text)
+            continue
+        try:
+            await message.add_reaction(emoji)
+            logger.info("Added reaction %s to message %s", emoji_text, message.id)
+        except discord.Forbidden:
+            logger.error(
+                "Discord rejected reaction %s on message %s. Check Add Reactions and Use External Emojis permissions and that the emoji is available to this server.",
+                emoji_text,
+                message.id,
+            )
+        except discord.HTTPException as exc:
+            logger.error("Failed to add reaction %s to message %s: %s", emoji_text, message.id, exc)
