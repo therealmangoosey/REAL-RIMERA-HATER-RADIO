@@ -1,6 +1,10 @@
+import json
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from keyword_reactions import matching_reactions
+from keyword_reactions import matching_reactions, reactions_enabled, set_reactions_enabled
 
 
 class TestKeywordReactions(unittest.TestCase):
@@ -49,6 +53,27 @@ class TestKeywordReactions(unittest.TestCase):
 
     def test_empty_content(self):
         self.assertEqual(matching_reactions(""), [])
+
+    def test_toggle_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "config.json")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({"polling_interval_minutes": 5}, handle)
+
+            with patch("keyword_reactions.CONFIG_FILE", config_path):
+                self.assertTrue(set_reactions_enabled(False))
+                self.assertFalse(reactions_enabled())
+
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    saved = json.load(handle)
+                self.assertFalse(saved["reactions_enabled"])
+
+                self.assertTrue(set_reactions_enabled(True))
+                self.assertTrue(reactions_enabled())
+
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    saved = json.load(handle)
+                self.assertTrue(saved["reactions_enabled"])
 
 
 if __name__ == "__main__":
