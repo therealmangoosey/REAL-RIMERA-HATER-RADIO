@@ -25,23 +25,21 @@ KEYWORD_REACTIONS: Dict[str, str] = {
     "campwander": "<:CAMPWANDER:1492324641556008970>",
 }
 
-_PATTERN = re.compile(
-    r"(?<![\w])(?:"
-    + "|".join(re.escape(alias) for alias in sorted(KEYWORD_REACTIONS, key=len, reverse=True))
-    + r")(?![\w])",
-    re.IGNORECASE,
-)
-
 
 def matching_reactions(content: str) -> List[str]:
-    """Return unique custom emojis for every matching configured alias."""
+    """Return unique custom emojis for every matching configured alias.
+
+    Aliases are checked independently so overlapping entries also count. For
+    example, "real rimera hater radio" matches both that full alias and
+    "rimera", as required by the manual alias table.
+    """
     if not content:
         return []
 
     found: List[str] = []
-    for match in _PATTERN.finditer(content):
-        emoji = KEYWORD_REACTIONS[match.group(0).lower()]
-        if emoji not in found:
+    for alias, emoji in KEYWORD_REACTIONS.items():
+        pattern = re.compile(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", re.IGNORECASE)
+        if pattern.search(content) and emoji not in found:
             found.append(emoji)
     return found
 
