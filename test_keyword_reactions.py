@@ -22,7 +22,8 @@ class TestKeywordReactions(unittest.TestCase):
     def test_all_manual_aliases(self):
         content = (
             "jazz punk bushwa vol 1 volume one vol 2 volume 2 volume two "
-            "real rimera hater real rimera hater radio rimera cd dense cw campwander"
+            "real rimera hater real rimera hater radio rimera cd dense cw campwander "
+            "camp wander camp-wander camp_wander catch me if you can cmiyc"
         )
         self.assertEqual(
             matching_reactions(content),
@@ -37,6 +38,20 @@ class TestKeywordReactions(unittest.TestCase):
                 "<:CAMPWANDER:1492324641556008970>",
             ],
         )
+
+    def test_camp_wander_aliases(self):
+        for alias in ("cw", "campwander", "camp wander", "camp-wander", "camp_wander"):
+            self.assertEqual(
+                matching_reactions(alias),
+                ["<:CAMPWANDER:1492324641556008970>"],
+            )
+
+    def test_catch_me_if_you_can_aliases(self):
+        for alias in ("vol 1", "volume 1", "volume one", "catch me if you can", "cmiyc"):
+            self.assertEqual(
+                matching_reactions(alias),
+                ["<:CatchMeIfYouCan:1480703883356536985>"],
+            )
 
     def test_multiple_matches_get_each_unique_emoji(self):
         self.assertEqual(
