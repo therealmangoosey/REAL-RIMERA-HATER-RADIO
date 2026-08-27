@@ -7,7 +7,7 @@ match and, when matched, a small number of Discord reaction requests.
 
 import asyncio
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 # The old keyword reaction table is not present in the repository history, so
 # keep this small/default table easy to edit without touching bot.py.
@@ -15,6 +15,7 @@ from typing import Dict, List, Tuple
 KEYWORD_REACTIONS: Dict[str, str] = {
     "rimera": "💗",
     "rimerahate": "😭",
+    "rimerahater": "😭",
     "radio": "📻",
     "song": "🎵",
     "music": "🎶",
@@ -59,13 +60,8 @@ async def react_to_message(message) -> None:
     if not emojis:
         return
 
-    # Keep the requests concurrent so matched messages react immediately while
-    # still capping the work to a tiny fixed amount.
     results = await asyncio.gather(
         *(message.add_reaction(emoji) for emoji in emojis),
         return_exceptions=True,
     )
-
-    # Permission/rate-limit failures should never break the bot's main listener.
-    # No per-message logging is used here to avoid log spam on busy servers.
     _ = results
