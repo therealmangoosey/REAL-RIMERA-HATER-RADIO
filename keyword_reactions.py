@@ -1,43 +1,40 @@
-"""Lightweight keyword-to-emoji reactions for the Rimera bot.
-
-This module is intentionally dependency-free apart from discord.py. The keyword
-map is compiled once at import time so normal messages only do a cheap regex
-match and, when matched, a small number of Discord reaction requests.
-"""
+"""Alias-based custom emoji reactions for the Rimera bot."""
 
 import asyncio
 import re
 from typing import Dict, List
 
-# The old keyword reaction table is not present in the repository history, so
-# keep this small/default table easy to edit without touching bot.py.
-# Add or change entries here as: "word": "emoji".
+# Keep this table explicit and local. Do not populate it from Discord/API data.
+# Each key is a manual alias/phrase and each value is the exact custom emoji
+# string to add when that phrase appears in a message.
 KEYWORD_REACTIONS: Dict[str, str] = {
-    "rimera": "💗",
-    "rimerahate": "😭",
-    "rimerahater": "😭",
-    "radio": "📻",
-    "song": "🎵",
-    "music": "🎶",
-    "merch": "🛍️",
-    "instagram": "📸",
-    "tiktok": "🎬",
-    "spotify": "🎧",
-    "youtube": "▶️",
+    "jazz punk": "<:JazzPunk:1395637360682602587>",
+    "bushwa": "<:BUSHWA:1395637306408566805>",
+    "vol 1": "<:CatchMeIfYouCan:1480703883356536985>",
+    "volume 1": "<:CatchMeIfYouCan:1480703883356536985>",
+    "volume one": "<:CatchMeIfYouCan:1480703883356536985>",
+    "vol 2": "<:RealRimeraHaterRadio:1504949135655305246>",
+    "volume 2": "<:RealRimeraHaterRadio:1504949135655305246>",
+    "volume two": "<:RealRimeraHaterRadio:1504949135655305246>",
+    "real rimera hater": "<:RealRimeraHaterRadio:1504949135655305246>",
+    "real rimera hater radio": "<:RealRimeraHaterRadio:1504949135655305246>",
+    "rimera": "<:Pinkface:1430050553752190996>",
+    "cd": "<:TheCDKeeper:1482891305171554304>",
+    "dense": "<:dense:1512748563648479342>",
+    "cw": "<:CAMPWANDER:1492324641556008970>",
+    "campwander": "<:CAMPWANDER:1492324641556008970>",
 }
 
-MAX_REACTIONS_PER_MESSAGE = 3
-
 _PATTERN = re.compile(
-    r"(?<![\w])(?:" + "|".join(
-        re.escape(word) for word in sorted(KEYWORD_REACTIONS, key=len, reverse=True)
-    ) + r")(?![\w])",
+    r"(?<![\w])(?:"
+    + "|".join(re.escape(alias) for alias in sorted(KEYWORD_REACTIONS, key=len, reverse=True))
+    + r")(?![\w])",
     re.IGNORECASE,
 )
 
 
 def matching_reactions(content: str) -> List[str]:
-    """Return unique emojis for matched whole-word keywords, capped per message."""
+    """Return unique custom emojis for every matching configured alias."""
     if not content:
         return []
 
@@ -46,13 +43,11 @@ def matching_reactions(content: str) -> List[str]:
         emoji = KEYWORD_REACTIONS[match.group(0).lower()]
         if emoji not in found:
             found.append(emoji)
-            if len(found) >= MAX_REACTIONS_PER_MESSAGE:
-                break
     return found
 
 
 async def react_to_message(message) -> None:
-    """React to a message when it contains configured keywords."""
+    """React to a message when it contains one or more configured aliases."""
     if message.author.bot or not message.content:
         return
 
